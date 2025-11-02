@@ -176,16 +176,28 @@ function getHeadersFromSillyTavernContext() {
 
 // Get headers for SillyTavern API requests (with CSRF token if available)
 function getSillyTavernHeaders() {
-  // Try to use SillyTavern's built-in method first
+  // Try to use SillyTavern's built-in method first (THIS IS THE KEY!)
   if (typeof SillyTavern !== "undefined" && SillyTavern.getContext?.getRequestHeaders) {
     try {
-      return SillyTavern.getContext.getRequestHeaders()
+      const headers = SillyTavern.getContext.getRequestHeaders()
+      
+      if (settings.debugMode) {
+        console.log("[Qdrant Memory] Using SillyTavern's built-in headers")
+        console.log("[Qdrant Memory] Headers:", headers)
+      }
+      
+      return headers
     } catch (error) {
       console.warn("[Qdrant Memory] Failed to get ST request headers:", error)
+      // Fall through to manual method
     }
   }
   
   // Fallback to manual headers (may not work with CSRF protection)
+  if (settings.debugMode) {
+    console.warn("[Qdrant Memory] SillyTavern.getContext.getRequestHeaders() not available, using fallback")
+  }
+  
   const headers = {
     "Content-Type": "application/json",
     Accept: "application/json",
@@ -197,7 +209,7 @@ function getSillyTavernHeaders() {
 
   if (csrfToken) {
     if (settings.debugMode) {
-      console.log("[Qdrant Memory] Using CSRF token:", csrfToken.substring(0, 10) + "...")
+      console.log("[Qdrant Memory] Using manual CSRF token:", csrfToken.substring(0, 10) + "...")
     }
     headers["X-CSRF-Token"] = csrfToken
     headers["X-CSRFToken"] = csrfToken
