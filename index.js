@@ -144,13 +144,26 @@ function getCSRFTokenFromSessionCookie() {
     const cookies = document.cookie ? document.cookie.split(";") : []
     
     for (const cookie of cookies) {
-      const [cookieName, cookieValue] = cookie.trim().split("=")
+      const [cookieName, ...cookieValueParts] = cookie.trim().split("=")
+      const cookieValue = cookieValueParts.join("=") // Handle values with = in them
       
       // Check if this is a session cookie (common patterns)
       if (cookieName && (cookieName.startsWith('session-') || cookieName === 'session')) {
         try {
-          // The value might be base64 encoded JSON
-          const decoded = atob(cookieValue.split('.')[0]) // Remove signature if present
+          // Decode the base64 value (it ends with = which is base64 padding)
+          let base64Value = cookieValue
+          
+          // Remove URL encoding if present
+          base64Value = decodeURIComponent(base64Value)
+          
+          // Decode from base64
+          const decoded = atob(base64Value)
+          
+          if (settings.debugMode) {
+            console.log(`[Qdrant Memory] Decoded session cookie ${cookieName}:`, decoded)
+          }
+          
+          // Parse as JSON
           const sessionData = JSON.parse(decoded)
           
           // Check for CSRF token in various formats
@@ -162,10 +175,14 @@ function getCSRFTokenFromSessionCookie() {
           if (token && typeof token === 'string') {
             if (settings.debugMode) {
               console.log(`[Qdrant Memory] Found CSRF token in session cookie: ${cookieName}`)
+              console.log(`[Qdrant Memory] Token value: ${token}`)
             }
             return token
           }
         } catch (e) {
+          if (settings.debugMode) {
+            console.log(`[Qdrant Memory] Could not decode session cookie ${cookieName}:`, e.message)
+          }
           // Not a JSON session cookie, continue
           continue
         }
