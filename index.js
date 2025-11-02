@@ -8,8 +8,7 @@ const extensionName = "qdrant-memory"
 const defaultSettings = {
   enabled: true,
   qdrantUrl: "http://localhost:6333",
-  qdrantApiKey: "", // Add API key support for Qdrant Cloud
-  collectionName: "sillytavern_memories",
+  collectionName: "mem",
   openaiApiKey: "",
   embeddingModel: "text-embedding-3-large",
   memoryLimit: 5,
@@ -80,6 +79,24 @@ function getEmbeddingDimensions() {
     "text-embedding-ada-002": 1536,
   }
   return dimensions[settings.embeddingModel] || 1536
+}
+
+// Get headers for SillyTavern API requests (with CSRF token if available)
+function getSillyTavernHeaders() {
+  const headers = {
+    "Content-Type": "application/json",
+  }
+  
+  // Try to get CSRF token from meta tag or global variable
+  const csrfToken = document.querySelector('meta[name="csrf-token"]')?.content 
+                    || window.token 
+                    || window.csrf_token
+  
+  if (csrfToken) {
+    headers["X-CSRF-Token"] = csrfToken
+  }
+  
+  return headers
 }
 
 // Get headers for Qdrant requests (with optional API key)
@@ -535,7 +552,7 @@ const MAX_MEMORY_LENGTH = 1500 // adjust per your preference
 function formatMemories(memories) {
   if (!memories || memories.length === 0) return ""
 
-  let formatted = "\n[Retrieved from past conversations]\n\n"
+  let formatted = "\n[Past chat memories]\n\n"
 
   memories.forEach((memory) => {
     const payload = memory.payload
@@ -616,9 +633,7 @@ async function getCharacterChats(characterName) {
     // ✅ FIXED: Use correct SillyTavern endpoint with credentials for authenticated instances
     const response = await fetch("/api/characters/chats", {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
+      headers: getSillyTavernHeaders(),
       credentials: "include", // Include cookies for authentication
       body: JSON.stringify({
         avatar_url: avatar_url,
@@ -741,9 +756,7 @@ async function loadChatFile(characterName, chatFile) {
     // ✅ FIXED: Use correct SillyTavern endpoint with credentials
     const response = await fetch("/api/chats/get", {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
+      headers: getSillyTavernHeaders(),
       credentials: "include", // Include cookies for authentication
       body: JSON.stringify({
         ch_name: characterName,
@@ -1323,7 +1336,7 @@ function createSettingsUI() {
         <div class="qdrant-memory-settings">
             <div class="inline-drawer">
                 <div class="inline-drawer-toggle inline-drawer-header">
-                    <b>Qdrant Memory Extension v3.1.0</b>
+                    <b>Qdrant Memory</b>
                     <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
                 </div>
                 <div class="inline-drawer-content">
@@ -1347,14 +1360,7 @@ function createSettingsUI() {
                 <input type="text" id="qdrant_url" class="text_pole" value="${settings.qdrantUrl}" 
                        style="width: 100%; margin-top: 5px;" 
                        placeholder="http://localhost:6333" />
-                <small style="color: #666;">URL of your Qdrant instance (local or cloud)</small>
-            </div>
-            
-            <div style="margin: 10px 0;">
-                <label><strong>Qdrant API Key:</strong> <small style="color: #666;">(optional, for Qdrant Cloud)</small></label>
-                <input type="password" id="qdrant_api_key" class="text_pole" value="${settings.qdrantApiKey}" 
-                       placeholder="Your Qdrant Cloud API key" style="width: 100%; margin-top: 5px;" />
-                <small style="color: #666;">Leave empty for local instances</small>
+                <small style="color: #666;">URL of your Qdrant instance</small>
             </div>
             
             <div style="margin: 10px 0;">
@@ -1387,7 +1393,7 @@ function createSettingsUI() {
             
             <div style="margin: 10px 0;">
                 <label><strong>Number of Memories:</strong> <span id="memory_limit_display">${settings.memoryLimit}</span></label>
-                <input type="range" id="qdrant_memory_limit" min="1" max="10" value="${settings.memoryLimit}" 
+                <input type="range" id="qdrant_memory_limit" min="1" max="50" value="${settings.memoryLimit}" 
                        style="width: 100%; margin-top: 5px;" />
                 <small style="color: #666;">Maximum memories to retrieve per generation</small>
             </div>
@@ -1401,14 +1407,14 @@ function createSettingsUI() {
             
             <div style="margin: 10px 0;">
                 <label><strong>Memory Position:</strong> <span id="memory_position_display">${settings.memoryPosition}</span></label>
-                <input type="range" id="qdrant_memory_position" min="1" max="10" value="${settings.memoryPosition}" 
+                <input type="range" id="qdrant_memory_position" min="1" max="30" value="${settings.memoryPosition}" 
                        style="width: 100%; margin-top: 5px;" />
                 <small style="color: #666;">How many messages from the end to insert memories</small>
             </div>
             
             <div style="margin: 10px 0;">
                 <label><strong>Retain Recent Messages:</strong> <span id="retain_recent_display">${settings.retainRecentMessages}</span></label>
-                <input type="range" id="qdrant_retain_recent" min="0" max="20" value="${settings.retainRecentMessages}" 
+                <input type="range" id="qdrant_retain_recent" min="0" max="50" value="${settings.retainRecentMessages}" 
                        style="width: 100%; margin-top: 5px;" />
                 <small style="color: #666;">Exclude the last N messages from retrieval (0 = no exclusion)</small>
             </div>
@@ -1491,11 +1497,8 @@ function createSettingsUI() {
   $("#extensions_settings2").append(settingsHtml)
 
   // Ensure the inline drawer uses SillyTavern's default behaviour
-
   if (typeof window.applyInlineDrawerListeners === "function") {
-
     window.applyInlineDrawerListeners()
-
   }
 
   // Event handlers
@@ -1505,10 +1508,6 @@ function createSettingsUI() {
 
   $("#qdrant_url").on("input", function () {
     settings.qdrantUrl = $(this).val()
-  })
-
-  $("#qdrant_api_key").on("input", function () {
-    settings.qdrantApiKey = $(this).val()
   })
 
   $("#qdrant_collection").on("input", function () {
@@ -1597,9 +1596,8 @@ function createSettingsUI() {
           .text(`✓ Connected! Found ${collections.length} collections.`)
           .css({ color: "green", background: "#d4edda", border: "1px solid green" })
       } else {
-        const errorText = await response.text().catch(() => "")
         $("#qdrant_status")
-          .text(`✗ Connection failed (${response.status}): ${response.statusText}. Check URL and API key.`)
+          .text("✗ Connection failed. Check URL.")
           .css({ color: "#721c24", background: "#f8d7da", border: "1px solid #721c24" })
       }
     } catch (error) {
