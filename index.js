@@ -1749,6 +1749,38 @@ function createSettingsUI() {
   })
 
   $("#qdrant_test_csrf").on("click", () => {
+    console.log("[Qdrant Memory] === CSRF Token Debug ===")
+    console.log("[Qdrant Memory] All cookies:", document.cookie)
+    
+    // Try to find session cookie
+    const cookies = document.cookie.split(';')
+    console.log("[Qdrant Memory] Cookie count:", cookies.length)
+    
+    cookies.forEach(cookie => {
+      const [name, ...valueParts] = cookie.trim().split('=')
+      console.log(`[Qdrant Memory] Cookie: ${name}`)
+    })
+    
+    // Try to decode session cookie
+    const sessionCookie = cookies.find(c => c.trim().startsWith('session-') || c.trim().startsWith('session='))
+    if (sessionCookie) {
+      console.log("[Qdrant Memory] Found session cookie:", sessionCookie.substring(0, 50) + "...")
+      try {
+        const [name, ...valueParts] = sessionCookie.trim().split('=')
+        const value = valueParts.join('=')
+        console.log("[Qdrant Memory] Cookie value (first 50 chars):", value.substring(0, 50))
+        const decoded = atob(value)
+        console.log("[Qdrant Memory] Decoded:", decoded)
+        const json = JSON.parse(decoded)
+        console.log("[Qdrant Memory] Parsed JSON:", json)
+        console.log("[Qdrant Memory] CSRF Token from cookie:", json.csrfToken)
+      } catch (e) {
+        console.error("[Qdrant Memory] Error decoding:", e)
+      }
+    } else {
+      console.log("[Qdrant Memory] No session cookie found")
+    }
+    
     const csrfToken = pickFirstCSRFToken()
     
     if (csrfToken) {
@@ -1765,7 +1797,7 @@ function createSettingsUI() {
       console.log("  - LocalStorage:", localStorage.getItem('csrf_token') ? "Found" : "Not found")
     } else {
       $("#qdrant_status")
-        .html(`✗ No CSRF Token Found<br>API calls will fail with 403 errors<br>Try refreshing the page`)
+        .html(`✗ No CSRF Token Found<br>API calls will fail with 403 errors<br>Check console for details`)
         .css({ color: "#721c24", background: "#f8d7da", border: "1px solid #721c24" })
       
       console.error("[Qdrant Memory] CSRF token not found. Checked:")
