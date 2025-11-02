@@ -1,6 +1,6 @@
 // Qdrant Memory Extension for SillyTavern
 // This extension retrieves relevant memories from Qdrant and injects them into conversations
-// Version 3.1.1 - Fixed CSRF token handling and authentication
+// Version 3.1.0 - Added temporal context with visible dates in memory chunks
 
 const extensionName = "qdrant-memory"
 
@@ -81,175 +81,30 @@ function getEmbeddingDimensions() {
   return dimensions[settings.embeddingModel] || 1536
 }
 
-// Helper to safely call potential CSRF token providers
-function tryGetCSRFTokenFromHelpers() {
-  const helperCandidates = [
-    () => (typeof window.getCSRFToken === "function" ? window.getCSRFToken() : null),
-    () => (typeof window.getCsrfToken === "function" ? window.getCsrfToken() : null),
-    () =>
-      typeof window.SillyTavern?.getCSRFToken === "function"
-        ? window.SillyTavern.getCSRFToken()
-        : null,
-    () =>
-      typeof window.SillyTavern?.getCsrfToken === "function"
-        ? window.SillyTavern.getCsrfToken()
-        : null,
-    () =>
-      typeof window.SillyTavern?.extensions?.webui?.getCSRFToken === "function"
-        ? window.SillyTavern.extensions.webui.getCSRFToken()
-        : null,
-    () =>
-      typeof window.SillyTavern?.extensions?.webui?.getCsrfToken === "function"
-        ? window.SillyTavern.extensions.webui.getCsrfToken()
-        : null,
-    // Try accessing token from localStorage as some ST versions store it there
-    () => localStorage.getItem('csrf_token'),
-    () => localStorage.getItem('csrfToken'),
-    () => sessionStorage.getItem('csrf_token'),
-    () => sessionStorage.getItem('csrfToken'),
-  ]
-
-  for (const helper of helperCandidates) {
-    try {
-      const token = helper()
-      if (typeof token === "string" && token.trim().length > 0) {
-        return token.trim()
-      }
-    } catch (error) {
-      console.warn("[Qdrant Memory] Failed to read CSRF token from helper:", error)
-    }
-  }
-
-  return null
-}
-
-// Helper to read a cookie value by name
-function getCookie(name) {
-  const cookies = document.cookie ? document.cookie.split(";") : []
-
-  for (const cookie of cookies) {
-    const [cookieName, ...rest] = cookie.trim().split("=")
-    if (cookieName === name) {
-      return decodeURIComponent(rest.join("="))
-    }
-  }
-
-  return null
-}
-
-// Helper to decode CSRF token from session cookie
-function getCSRFTokenFromSessionCookie() {
-  try {
-    // Look for session cookies that might contain the CSRF token
-    const cookies = document.cookie ? document.cookie.split(";") : []
-    
-    for (const cookie of cookies) {
-      const [cookieName, ...cookieValueParts] = cookie.trim().split("=")
-      const cookieValue = cookieValueParts.join("=") // Handle values with = in them
-      
-      // Check if this is a session cookie (common patterns)
-      if (cookieName && (cookieName.startsWith('session-') || cookieName === 'session')) {
-        try {
-          // Decode the base64 value (it ends with = which is base64 padding)
-          let base64Value = cookieValue
-          
-          // Remove URL encoding if present
-          base64Value = decodeURIComponent(base64Value)
-          
-          // Decode from base64
-          const decoded = atob(base64Value)
-          
-          if (settings.debugMode) {
-            console.log(`[Qdrant Memory] Decoded session cookie ${cookieName}:`, decoded)
-          }
-          
-          // Parse as JSON
-          const sessionData = JSON.parse(decoded)
-          
-          // Check for CSRF token in various formats
-          const token = sessionData.csrfToken || 
-                       sessionData.csrf_token || 
-                       sessionData.csrfSecret ||
-                       sessionData._csrf
-          
-          if (token && typeof token === 'string') {
-            if (settings.debugMode) {
-              console.log(`[Qdrant Memory] Found CSRF token in session cookie: ${cookieName}`)
-              console.log(`[Qdrant Memory] Token value: ${token}`)
-            }
-            return token
-          }
-        } catch (e) {
-          if (settings.debugMode) {
-            console.log(`[Qdrant Memory] Could not decode session cookie ${cookieName}:`, e.message)
-          }
-          // Not a JSON session cookie, continue
-          continue
-        }
-      }
-    }
-  } catch (error) {
-    console.warn("[Qdrant Memory] Error decoding session cookie:", error)
-  }
-  
-  return null
-}
-
-function pickFirstCSRFToken() {
-  const tokenCandidates = [
-    document.querySelector('meta[name="csrf-token"]')?.content,
-    document.querySelector('meta[name="csrfToken"]')?.content,
-    window.CSRF_TOKEN,
-    window.CSRFToken,
-    window.csrfToken,
-    window.csrf_token,
-    tryGetCSRFTokenFromHelpers(),
-    getCSRFTokenFromSessionCookie(), // NEW: Check session cookie first
-    getCookie("csrftoken"),
-    getCookie("csrf_token"),
-    getCookie("XSRF-TOKEN"),
-    getCookie("XSRF_TOKEN"),
-  ]
-
-  for (const token of tokenCandidates) {
-    if (typeof token === "string" && token.trim().length > 0) {
-      return token.trim()
-    }
-  }
-
-  return null
-}
-
 // Get headers for SillyTavern API requests (with CSRF token if available)
 function getSillyTavernHeaders() {
-  // Try to use SillyTavern's built-in method first
-  if (typeof SillyTavern !== "undefined" && SillyTavern.getContext?.getRequestHeaders) {
-    try {
-      return SillyTavern.getContext.getRequestHeaders()
-    } catch (error) {
-      console.warn("[Qdrant Memory] Failed to get ST request headers:", error)
-    }
+  const SillyTavern = window.SillyTavern
+
+  if (typeof SillyTavern !== "undefined" && typeof SillyTavern.getRequestHeaders === "function") {
+    // SillyTavern's built-in method handles CSRF token automatically
+    return SillyTavern.getRequestHeaders()
   }
-  
-  // Fallback to manual headers (may not work with CSRF protection)
+
+  // Fallback for manual header construction
   const headers = {
     "Content-Type": "application/json",
-    Accept: "application/json",
-    Origin: window.location.origin,
-    "X-Requested-With": "XMLHttpRequest",
   }
 
-  const csrfToken = pickFirstCSRFToken()
+  // Try alternative methods to get CSRF token
+  const csrfToken =
+    document.querySelector('meta[name="csrf-token"]')?.content ||
+    document.querySelector('meta[name="csrf_token"]')?.content ||
+    window.token ||
+    window.csrf_token ||
+    window.csrfToken
 
   if (csrfToken) {
-    if (settings.debugMode) {
-      console.log("[Qdrant Memory] Using CSRF token:", csrfToken.substring(0, 10) + "...")
-    }
     headers["X-CSRF-Token"] = csrfToken
-    headers["X-CSRFToken"] = csrfToken
-    headers["csrf-token"] = csrfToken
-  } else {
-    console.warn("[Qdrant Memory] No CSRF token found - requests may fail")
   }
 
   return headers
@@ -260,11 +115,11 @@ function getQdrantHeaders() {
   const headers = {
     "Content-Type": "application/json",
   }
-  
+
   if (settings.qdrantApiKey) {
     headers["api-key"] = settings.qdrantApiKey
   }
-  
+
   return headers
 }
 
@@ -720,7 +575,7 @@ function formatMemories(memories) {
       speakerLabel = payload.speaker === "user" ? "You said" : "Character said"
     }
 
-    let text = payload.text.replace(/\n/g, " ") // flatten newlines
+    const text = payload.text.replace(/\n/g, " ") // flatten newlines
 
     const score = (memory.score * 100).toFixed(0)
 
@@ -768,31 +623,23 @@ async function getCharacterChats(characterName) {
   try {
     const context = getContext()
 
-    if (settings.debugMode) {
-      console.log("[Qdrant Memory] Getting chats for character:", characterName)
-      console.log("[Qdrant Memory] Context characters:", context.characters)
-    }
+    console.log("[Qdrant Memory] Getting chats for character:", characterName)
+    console.log("[Qdrant Memory] Context characters:", context.characters)
 
     // Try to get the character's avatar URL
     let avatar_url = `${characterName}.png`
     if (context.characters && Array.isArray(context.characters)) {
       const char = context.characters.find((c) => c.name === characterName)
-      if (settings.debugMode) {
-        console.log("[Qdrant Memory] Found character object:", char)
-      }
+      console.log("[Qdrant Memory] Found character object:", char)
       if (char && char.avatar) {
         avatar_url = char.avatar
-        if (settings.debugMode) {
-          console.log("[Qdrant Memory] Using avatar from character:", avatar_url)
-        }
+        console.log("[Qdrant Memory] Using avatar from character:", avatar_url)
+      } else {
+        console.log("[Qdrant Memory] No avatar in character object, trying default")
       }
     }
 
-    if (settings.debugMode) {
-      console.log("[Qdrant Memory] Final avatar_url:", avatar_url)
-      const csrfToken = pickFirstCSRFToken()
-      console.log("[Qdrant Memory] CSRF token available:", csrfToken ? "Yes" : "No")
-    }
+    console.log("[Qdrant Memory] Final avatar_url:", avatar_url)
 
     // ✅ FIXED: Use correct SillyTavern endpoint with credentials for authenticated instances
     const response = await fetch("/api/characters/chats", {
@@ -813,64 +660,56 @@ async function getCharacterChats(characterName) {
       const errorText = await response.text()
       console.error("[Qdrant Memory] Failed to get chat list:", response.status, response.statusText)
       console.error("[Qdrant Memory] Error response:", errorText)
-      
-      // If 403, provide helpful message about CSRF token
-      if (response.status === 403) {
-        console.error("[Qdrant Memory] 403 Forbidden - This usually means:")
-        console.error("  1. CSRF token is missing or invalid")
-        console.error("  2. The endpoint requires authentication")
-        console.error("  3. Try refreshing the page to get a new CSRF token")
-        
-        const toastr = window.toastr
-        if (toastr) {
-          toastr.error("Authentication failed. Try refreshing the page.", "Qdrant Memory", { timeOut: 5000 })
-        }
-      }
-      
       return []
     }
 
     const data = await response.json()
-    
+
     if (settings.debugMode) {
       console.log("[Qdrant Memory] Received data:", data)
     }
 
     // Handle different response formats - extract just the filenames
     let chatFiles = []
-    
+
     if (Array.isArray(data)) {
       // If it's an array of strings, use directly
-      if (typeof data[0] === 'string') {
+      if (typeof data[0] === "string") {
         chatFiles = data
       }
       // If it's an array of objects with file_name
       else if (data[0] && data[0].file_name) {
-        chatFiles = data.map(item => item.file_name)
+        chatFiles = data.map((item) => item.file_name)
       }
       // If it's an array of other objects, try to extract filename
       else {
-        chatFiles = data.map(item => {
-          if (typeof item === 'string') return item
+        chatFiles = data
+          .map((item) => {
+            if (typeof item === "string") return item
+            if (item.file_name) return item.file_name
+            if (item.filename) return item.filename
+            return null
+          })
+          .filter((f) => f !== null)
+      }
+    } else if (data && Array.isArray(data.files)) {
+      chatFiles = data.files
+        .map((item) => {
+          if (typeof item === "string") return item
           if (item.file_name) return item.file_name
           if (item.filename) return item.filename
           return null
-        }).filter(f => f !== null)
-      }
-    } else if (data && Array.isArray(data.files)) {
-      chatFiles = data.files.map(item => {
-        if (typeof item === 'string') return item
-        if (item.file_name) return item.file_name
-        if (item.filename) return item.filename
-        return null
-      }).filter(f => f !== null)
+        })
+        .filter((f) => f !== null)
     } else if (data && Array.isArray(data.chats)) {
-      chatFiles = data.chats.map(item => {
-        if (typeof item === 'string') return item
-        if (item.file_name) return item.file_name
-        if (item.filename) return item.filename
-        return null
-      }).filter(f => f !== null)
+      chatFiles = data.chats
+        .map((item) => {
+          if (typeof item === "string") return item
+          if (item.file_name) return item.file_name
+          if (item.filename) return item.filename
+          return null
+        })
+        .filter((f) => f !== null)
     }
 
     if (settings.debugMode) {
@@ -896,7 +735,7 @@ async function loadChatFile(characterName, chatFile) {
     }
 
     // Ensure chatFile is a string
-    if (typeof chatFile !== 'string') {
+    if (typeof chatFile !== "string") {
       console.error("[Qdrant Memory] chatFile is not a string:", chatFile)
       if (chatFile && chatFile.file_name) {
         chatFile = chatFile.file_name
@@ -907,7 +746,7 @@ async function loadChatFile(characterName, chatFile) {
 
     // CRITICAL: Remove .jsonl extension as the API adds it back
     // The endpoint does: `${file_name}.jsonl`, so we must send without extension
-    const fileNameWithoutExt = chatFile.replace(/\.jsonl$/, '')
+    const fileNameWithoutExt = chatFile.replace(/\.jsonl$/, "")
 
     if (settings.debugMode) {
       console.log("[Qdrant Memory] Original filename:", chatFile)
@@ -926,8 +765,8 @@ async function loadChatFile(characterName, chatFile) {
     if (settings.debugMode) {
       console.log("[Qdrant Memory] Loading with params:", {
         ch_name: characterName,
-        file_name: fileNameWithoutExt,
-        avatar_url: avatar_url
+        file_name: fileNameWithoutExt, // Use the variable without extension!
+        avatar_url: avatar_url,
       })
     }
 
@@ -955,7 +794,7 @@ async function loadChatFile(characterName, chatFile) {
     }
 
     const chatData = await response.json()
-    
+
     if (settings.debugMode) {
       console.log("[Qdrant Memory] Raw chat data received:", chatData)
       console.log("[Qdrant Memory] Chat data type:", typeof chatData)
@@ -964,7 +803,7 @@ async function loadChatFile(characterName, chatFile) {
         console.log("[Qdrant Memory] Chat data keys:", Object.keys(chatData))
       }
     }
-    
+
     // Handle different response formats
     let messages = null
     if (Array.isArray(chatData)) {
@@ -973,16 +812,16 @@ async function loadChatFile(characterName, chatFile) {
       messages = chatData.chat
     } else if (chatData && Array.isArray(chatData.messages)) {
       messages = chatData.messages
-    } else if (chatData && typeof chatData === 'object') {
+    } else if (chatData && typeof chatData === "object") {
       // Maybe the entire response is the chat data
       messages = [chatData]
     }
-    
+
     if (settings.debugMode) {
       console.log("[Qdrant Memory] Extracted messages:", messages)
       console.log("[Qdrant Memory] Loaded chat with", messages?.length || 0, "messages")
     }
-    
+
     return messages
   } catch (error) {
     console.error("[Qdrant Memory] Error loading chat file:", error)
@@ -1519,7 +1358,7 @@ function createSettingsUI() {
                 </div>
                 <div class="inline-drawer-content">
                     <p style="margin: 10px 0; color: #666; font-size: 0.9em;">
-                        Automatic memory creation with temporal context (v3.1.1 - Fixed CSRF)
+                        Automatic memory creation with temporal context
                     </p>
                     
                     <div style="margin: 15px 0;">
@@ -1660,7 +1499,6 @@ function createSettingsUI() {
             
             <div style="margin: 15px 0; display: flex; gap: 10px; flex-wrap: wrap;">
                 <button id="qdrant_test" class="menu_button">Test Connection</button>
-                <button id="qdrant_test_csrf" class="menu_button">Debug CSRF Token</button>
                 <button id="qdrant_save" class="menu_button">Save Settings</button>
                 <button id="qdrant_view_memories" class="menu_button">View Memories</button>
                 <button id="qdrant_index_chats" class="menu_button" style="background-color: #28a745; color: white;">Index Character Chats</button>
@@ -1758,75 +1596,12 @@ function createSettingsUI() {
     setTimeout(() => $("#qdrant_status").text("").css({ background: "", border: "" }), 3000)
   })
 
-  $("#qdrant_test_csrf").on("click", () => {
-    console.log("[Qdrant Memory] === CSRF Token Debug ===")
-    console.log("[Qdrant Memory] All cookies:", document.cookie)
-    
-    // Try to find session cookie
-    const cookies = document.cookie.split(';')
-    console.log("[Qdrant Memory] Cookie count:", cookies.length)
-    
-    cookies.forEach(cookie => {
-      const [name, ...valueParts] = cookie.trim().split('=')
-      console.log(`[Qdrant Memory] Cookie: ${name}`)
-    })
-    
-    // Try to decode session cookie
-    const sessionCookie = cookies.find(c => c.trim().startsWith('session-') || c.trim().startsWith('session='))
-    if (sessionCookie) {
-      console.log("[Qdrant Memory] Found session cookie:", sessionCookie.substring(0, 50) + "...")
-      try {
-        const [name, ...valueParts] = sessionCookie.trim().split('=')
-        const value = valueParts.join('=')
-        console.log("[Qdrant Memory] Cookie value (first 50 chars):", value.substring(0, 50))
-        const decoded = atob(value)
-        console.log("[Qdrant Memory] Decoded:", decoded)
-        const json = JSON.parse(decoded)
-        console.log("[Qdrant Memory] Parsed JSON:", json)
-        console.log("[Qdrant Memory] CSRF Token from cookie:", json.csrfToken)
-      } catch (e) {
-        console.error("[Qdrant Memory] Error decoding:", e)
-      }
-    } else {
-      console.log("[Qdrant Memory] No session cookie found")
-    }
-    
-    const csrfToken = pickFirstCSRFToken()
-    
-    if (csrfToken) {
-      $("#qdrant_status")
-        .html(`✓ CSRF Token Found<br>Token: ${csrfToken.substring(0, 20)}...<br>Length: ${csrfToken.length} chars`)
-        .css({ color: "green", background: "#d4edda", border: "1px solid green" })
-      
-      console.log("[Qdrant Memory] Full CSRF token:", csrfToken)
-      console.log("[Qdrant Memory] Token sources checked:")
-      console.log("  - Meta tags:", document.querySelector('meta[name="csrf-token"]')?.content ? "Found" : "Not found")
-      console.log("  - Window vars:", window.CSRF_TOKEN || window.CSRFToken || window.csrfToken || window.csrf_token ? "Found" : "Not found")
-      console.log("  - Session cookie:", getCSRFTokenFromSessionCookie() ? "Found ✓" : "Not found")
-      console.log("  - Cookies:", getCookie("csrftoken") || getCookie("XSRF-TOKEN") ? "Found" : "Not found")
-      console.log("  - LocalStorage:", localStorage.getItem('csrf_token') ? "Found" : "Not found")
-    } else {
-      $("#qdrant_status")
-        .html(`✗ No CSRF Token Found<br>API calls will fail with 403 errors<br>Check console for details`)
-        .css({ color: "#721c24", background: "#f8d7da", border: "1px solid #721c24" })
-      
-      console.error("[Qdrant Memory] CSRF token not found. Checked:")
-      console.error("  - Meta tags")
-      console.error("  - Window variables")
-      console.error("  - Session cookie")
-      console.error("  - Cookies")
-      console.error("  - LocalStorage")
-      console.error("  - SessionStorage")
-    }
-  })
-
   $("#qdrant_test").on("click", async () => {
     $("#qdrant_status")
       .text("Testing connection...")
       .css({ color: "#004085", background: "#cce5ff", border: "1px solid #004085" })
 
     try {
-      // Test Qdrant connection
       const response = await fetch(`${settings.qdrantUrl}/collections`, {
         headers: getQdrantHeaders(),
       })
@@ -1834,18 +1609,9 @@ function createSettingsUI() {
       if (response.ok) {
         const data = await response.json()
         const collections = data.result?.collections || []
-        
-        // Also test CSRF token
-        const csrfToken = pickFirstCSRFToken()
-        let csrfStatus = csrfToken ? "✓ CSRF token found" : "✗ No CSRF token (API calls may fail)"
-        
         $("#qdrant_status")
-          .html(`✓ Connected! Found ${collections.length} collections.<br>${csrfStatus}`)
+          .text(`✓ Connected! Found ${collections.length} collections.`)
           .css({ color: "green", background: "#d4edda", border: "1px solid green" })
-        
-        if (settings.debugMode && csrfToken) {
-          console.log("[Qdrant Memory] CSRF token:", csrfToken.substring(0, 10) + "...")
-        }
       } else {
         $("#qdrant_status")
           .text("✗ Connection failed. Check URL.")
@@ -1893,5 +1659,5 @@ window.jQuery(async () => {
     }, 2000)
   }
 
-  console.log("[Qdrant Memory] Extension loaded successfully (v3.1.1 - Fixed CSRF token handling)")
+  console.log("[Qdrant Memory] Extension loaded successfully (v3.1.0 - temporal context with dates)")
 })
