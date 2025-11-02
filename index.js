@@ -81,21 +81,50 @@ function getEmbeddingDimensions() {
   return dimensions[settings.embeddingModel] || 1536
 }
 
+// Helper to safely call potential CSRF token providers
+function tryGetCSRFTokenFromHelpers() {
+  const helpers = [
+    () => (typeof window.getCSRFToken === "function" ? window.getCSRFToken() : null),
+    () => (typeof window.SillyTavern?.getCSRFToken === "function" ? window.SillyTavern.getCSRFToken() : null),
+  ]
+
+  for (const helper of helpers) {
+    const token = helper()
+    if (token) {
+      return token
+    }
+  }
+
+  return null
+}
+
+// Helper to read a cookie value by name
+function getCookie(name) {
+  return document.cookie
+    .split(";")
+    .map((cookie) => cookie.trim())
+    .filter((cookie) => cookie.startsWith(`${name}=`))
+    .map((cookie) => cookie.substring(name.length + 1))
+    .shift() || null
+}
+
 // Get headers for SillyTavern API requests (with CSRF token if available)
 function getSillyTavernHeaders() {
   const headers = {
     "Content-Type": "application/json",
   }
-  
-  // Try to get CSRF token from meta tag or global variable
-  const csrfToken = document.querySelector('meta[name="csrf-token"]')?.content 
-                    || window.token 
-                    || window.csrf_token
-  
+
+  const metaToken = document.querySelector('meta[name="csrf-token"]')?.content
+  const globalToken = window.token || window.csrf_token
+  const helperToken = tryGetCSRFTokenFromHelpers()
+  const cookieToken = getCookie("csrftoken")
+
+  const csrfToken = metaToken || globalToken || helperToken || cookieToken
+
   if (csrfToken) {
     headers["X-CSRF-Token"] = csrfToken
   }
-  
+
   return headers
 }
 
