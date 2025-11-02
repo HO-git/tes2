@@ -1352,7 +1352,14 @@ function createSettingsUI() {
                 <input type="text" id="qdrant_url" class="text_pole" value="${settings.qdrantUrl}" 
                        style="width: 100%; margin-top: 5px;" 
                        placeholder="http://localhost:6333" />
-                <small style="color: #666;">URL of your Qdrant instance</small>
+                <small style="color: #666;">URL of your Qdrant instance (local or cloud)</small>
+            </div>
+            
+            <div style="margin: 10px 0;">
+                <label><strong>Qdrant API Key:</strong> <small style="color: #666;">(optional, for Qdrant Cloud)</small></label>
+                <input type="password" id="qdrant_api_key" class="text_pole" value="${settings.qdrantApiKey}" 
+                       placeholder="Your Qdrant Cloud API key" style="width: 100%; margin-top: 5px;" />
+                <small style="color: #666;">Leave empty for local instances</small>
             </div>
             
             <div style="margin: 10px 0;">
@@ -1503,6 +1510,10 @@ function createSettingsUI() {
     settings.qdrantUrl = $(this).val()
   })
 
+  $("#qdrant_api_key").on("input", function () {
+    settings.qdrantApiKey = $(this).val()
+  })
+
   $("#qdrant_collection").on("input", function () {
     settings.collectionName = $(this).val()
   })
@@ -1578,7 +1589,9 @@ function createSettingsUI() {
       .css({ color: "#004085", background: "#cce5ff", border: "1px solid #004085" })
 
     try {
-      const response = await fetch(`${settings.qdrantUrl}/collections`)
+      const response = await fetch(`${settings.qdrantUrl}/collections`, {
+        headers: getQdrantHeaders(),
+      })
 
       if (response.ok) {
         const data = await response.json()
@@ -1587,8 +1600,9 @@ function createSettingsUI() {
           .text(`✓ Connected! Found ${collections.length} collections.`)
           .css({ color: "green", background: "#d4edda", border: "1px solid green" })
       } else {
+        const errorText = await response.text().catch(() => "")
         $("#qdrant_status")
-          .text("✗ Connection failed. Check URL.")
+          .text(`✗ Connection failed (${response.status}): ${response.statusText}. Check URL and API key.`)
           .css({ color: "#721c24", background: "#f8d7da", border: "1px solid #721c24" })
       }
     } catch (error) {
