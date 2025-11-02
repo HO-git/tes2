@@ -222,6 +222,16 @@ function pickFirstCSRFToken() {
 
 // Get headers for SillyTavern API requests (with CSRF token if available)
 function getSillyTavernHeaders() {
+  // Try to use SillyTavern's built-in method first
+  if (typeof SillyTavern !== "undefined" && SillyTavern.getContext?.getRequestHeaders) {
+    try {
+      return SillyTavern.getContext.getRequestHeaders()
+    } catch (error) {
+      console.warn("[Qdrant Memory] Failed to get ST request headers:", error)
+    }
+  }
+  
+  // Fallback to manual headers (may not work with CSRF protection)
   const headers = {
     "Content-Type": "application/json",
     Accept: "application/json",
