@@ -156,20 +156,56 @@ function pickFirstCSRFToken() {
   return null
 }
 
-// Get headers for SillyTavern API requests (with CSRF token if available)
-function getSillyTavernHeaders() {
-  const headers = {
-    "Content-Type": "application/json",
-    Accept: "application/json",
-    Origin: window.location.origin,
-    "X-Requested-With": "XMLHttpRequest",
+function getHeadersFromSillyTavernContext() {
+  try {
+    const getRequestHeaders = window.SillyTavern?.getContext?.getRequestHeaders
+
+    if (typeof getRequestHeaders === "function") {
+      const headers = getRequestHeaders()
+
+      if (headers && typeof headers === "object") {
+        return headers
+      }
+    }
+  } catch (error) {
+    console.warn("[Qdrant Memory] Failed to read headers from SillyTavern context:", error)
   }
 
-  const csrfToken = pickFirstCSRFToken()
+  return null
+}
 
-  if (csrfToken) {
-    headers["X-CSRF-Token"] = csrfToken
-    headers["X-CSRFToken"] = csrfToken
+// Get headers for SillyTavern API requests (with CSRF token if available)
+function getSillyTavernHeaders() {
+  const contextHeaders = getHeadersFromSillyTavernContext() || {}
+  const headers = { ...contextHeaders }
+
+  if (!("Content-Type" in headers)) {
+    headers["Content-Type"] = "application/json"
+  }
+
+  if (!("Accept" in headers)) {
+    headers["Accept"] = "application/json"
+  }
+
+  if (!("Origin" in headers)) {
+    headers["Origin"] = window.location.origin
+  }
+
+  if (!("X-Requested-With" in headers)) {
+    headers["X-Requested-With"] = "XMLHttpRequest"
+  }
+
+  const hasCsrfHeader = Object.keys(headers).some((key) =>
+    ["x-csrf-token", "x-csrftoken"].includes(key.toLowerCase())
+  )
+
+  if (!hasCsrfHeader) {
+    const csrfToken = pickFirstCSRFToken()
+
+    if (csrfToken) {
+      headers["X-CSRF-Token"] = csrfToken
+      headers["X-CSRFToken"] = csrfToken
+    }
   }
 
   return headers
