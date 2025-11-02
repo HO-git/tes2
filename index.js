@@ -81,30 +81,131 @@ function getEmbeddingDimensions() {
   return dimensions[settings.embeddingModel] || 1536
 }
 
+// Helper to safely call potential CSRF token providers
+function tryGetCSRFTokenFromHelpers() {
+  const helperCandidates = [
+    () => (typeof window.getCSRFToken === "function" ? window.getCSRFToken() : null),
+    () => (typeof window.getCsrfToken === "function" ? window.getCsrfToken() : null),
+    () =>
+      typeof window.SillyTavern?.getCSRFToken === "function"
+        ? window.SillyTavern.getCSRFToken()
+        : null,
+    () =>
+      typeof window.SillyTavern?.getCsrfToken === "function"
+        ? window.SillyTavern.getCsrfToken()
+        : null,
+    () =>
+      typeof window.SillyTavern?.extensions?.webui?.getCSRFToken === "function"
+        ? window.SillyTavern.extensions.webui.getCSRFToken()
+        : null,
+    () =>
+      typeof window.SillyTavern?.extensions?.webui?.getCsrfToken === "function"
+        ? window.SillyTavern.extensions.webui.getCsrfToken()
+        : null,
+  ]
+
+  for (const helper of helperCandidates) {
+    try {
+      const token = helper()
+      if (typeof token === "string" && token.trim().length > 0) {
+        return token.trim()
+      }
+    } catch (error) {
+      console.warn("[Qdrant Memory] Failed to read CSRF token from helper:", error)
+    }
+  }
+
+  return null
+}
+
+// Helper to read a cookie value by name
+function getCookie(name) {
+  const cookies = document.cookie ? document.cookie.split(";") : []
+
+  for (const cookie of cookies) {
+    const [cookieName, ...rest] = cookie.trim().split("=")
+    if (cookieName === name) {
+      return decodeURIComponent(rest.join("="))
+    }
+  }
+
+  return null
+}
+
+function pickFirstCSRFToken() {
+  const tokenCandidates = [
+    document.querySelector('meta[name="csrf-token"]')?.content,
+    document.querySelector('meta[name="csrfToken"]')?.content,
+    window.CSRF_TOKEN,
+    window.CSRFToken,
+    window.csrfToken,
+    window.csrf_token,
+    tryGetCSRFTokenFromHelpers(),
+    getCookie("csrftoken"),
+    getCookie("csrf_token"),
+    getCookie("XSRF-TOKEN"),
+    getCookie("XSRF_TOKEN"),
+  ]
+
+  for (const token of tokenCandidates) {
+    if (typeof token === "string" && token.trim().length > 0) {
+      return token.trim()
+    }
+  }
+
+  return null
+}
+
+function getHeadersFromSillyTavernContext() {
+  try {
+    const getRequestHeaders = window.SillyTavern?.getContext?.getRequestHeaders
+
+    if (typeof getRequestHeaders === "function") {
+      const headers = getRequestHeaders()
+
+      if (headers && typeof headers === "object") {
+        return headers
+      }
+    }
+  } catch (error) {
+    console.warn("[Qdrant Memory] Failed to read headers from SillyTavern context:", error)
+  }
+
+  return null
+}
+
 // Get headers for SillyTavern API requests (with CSRF token if available)
 function getSillyTavernHeaders() {
-  const SillyTavern = window.SillyTavern
+  const contextHeaders = getHeadersFromSillyTavernContext() || {}
+  const headers = { ...contextHeaders }
 
-  if (typeof SillyTavern !== "undefined" && typeof SillyTavern.getRequestHeaders === "function") {
-    // SillyTavern's built-in method handles CSRF token automatically
-    return SillyTavern.getRequestHeaders()
+  if (!("Content-Type" in headers)) {
+    headers["Content-Type"] = "application/json"
   }
 
-  // Fallback for manual header construction
-  const headers = {
-    "Content-Type": "application/json",
+  if (!("Accept" in headers)) {
+    headers["Accept"] = "application/json"
   }
 
-  // Try alternative methods to get CSRF token
-  const csrfToken =
-    document.querySelector('meta[name="csrf-token"]')?.content ||
-    document.querySelector('meta[name="csrf_token"]')?.content ||
-    window.token ||
-    window.csrf_token ||
-    window.csrfToken
+  if (!("Origin" in headers)) {
+    headers["Origin"] = window.location.origin
+  }
 
-  if (csrfToken) {
-    headers["X-CSRF-Token"] = csrfToken
+  if (!("X-Requested-With" in headers)) {
+    headers["X-Requested-With"] = "XMLHttpRequest"
+  }
+
+  const hasCsrfHeader = Object.keys(headers).some((key) =>
+    ["x-csrf-token", "x-csrftoken"].includes(key.toLowerCase())
+  )
+
+  if (!hasCsrfHeader) {
+    const csrfToken = pickFirstCSRFToken()
+
+    if (csrfToken) {
+      headers["X-CSRF-Token"] = csrfToken
+      headers["X-CSRFToken"] = csrfToken
+    }
   }
 
   return headers
@@ -115,11 +216,11 @@ function getQdrantHeaders() {
   const headers = {
     "Content-Type": "application/json",
   }
-
+  
   if (settings.qdrantApiKey) {
     headers["api-key"] = settings.qdrantApiKey
   }
-
+  
   return headers
 }
 
@@ -575,7 +676,7 @@ function formatMemories(memories) {
       speakerLabel = payload.speaker === "user" ? "You said" : "Character said"
     }
 
-    const text = payload.text.replace(/\n/g, " ") // flatten newlines
+    let text = payload.text.replace(/\n/g, " ") // flatten newlines
 
     const score = (memory.score * 100).toFixed(0)
 
@@ -664,52 +765,46 @@ async function getCharacterChats(characterName) {
     }
 
     const data = await response.json()
-
+    
     if (settings.debugMode) {
       console.log("[Qdrant Memory] Received data:", data)
     }
 
     // Handle different response formats - extract just the filenames
     let chatFiles = []
-
+    
     if (Array.isArray(data)) {
       // If it's an array of strings, use directly
-      if (typeof data[0] === "string") {
+      if (typeof data[0] === 'string') {
         chatFiles = data
       }
       // If it's an array of objects with file_name
       else if (data[0] && data[0].file_name) {
-        chatFiles = data.map((item) => item.file_name)
+        chatFiles = data.map(item => item.file_name)
       }
       // If it's an array of other objects, try to extract filename
       else {
-        chatFiles = data
-          .map((item) => {
-            if (typeof item === "string") return item
-            if (item.file_name) return item.file_name
-            if (item.filename) return item.filename
-            return null
-          })
-          .filter((f) => f !== null)
+        chatFiles = data.map(item => {
+          if (typeof item === 'string') return item
+          if (item.file_name) return item.file_name
+          if (item.filename) return item.filename
+          return null
+        }).filter(f => f !== null)
       }
     } else if (data && Array.isArray(data.files)) {
-      chatFiles = data.files
-        .map((item) => {
-          if (typeof item === "string") return item
-          if (item.file_name) return item.file_name
-          if (item.filename) return item.filename
-          return null
-        })
-        .filter((f) => f !== null)
+      chatFiles = data.files.map(item => {
+        if (typeof item === 'string') return item
+        if (item.file_name) return item.file_name
+        if (item.filename) return item.filename
+        return null
+      }).filter(f => f !== null)
     } else if (data && Array.isArray(data.chats)) {
-      chatFiles = data.chats
-        .map((item) => {
-          if (typeof item === "string") return item
-          if (item.file_name) return item.file_name
-          if (item.filename) return item.filename
-          return null
-        })
-        .filter((f) => f !== null)
+      chatFiles = data.chats.map(item => {
+        if (typeof item === 'string') return item
+        if (item.file_name) return item.file_name
+        if (item.filename) return item.filename
+        return null
+      }).filter(f => f !== null)
     }
 
     if (settings.debugMode) {
@@ -735,7 +830,7 @@ async function loadChatFile(characterName, chatFile) {
     }
 
     // Ensure chatFile is a string
-    if (typeof chatFile !== "string") {
+    if (typeof chatFile !== 'string') {
       console.error("[Qdrant Memory] chatFile is not a string:", chatFile)
       if (chatFile && chatFile.file_name) {
         chatFile = chatFile.file_name
@@ -746,7 +841,7 @@ async function loadChatFile(characterName, chatFile) {
 
     // CRITICAL: Remove .jsonl extension as the API adds it back
     // The endpoint does: `${file_name}.jsonl`, so we must send without extension
-    const fileNameWithoutExt = chatFile.replace(/\.jsonl$/, "")
+    const fileNameWithoutExt = chatFile.replace(/\.jsonl$/, '')
 
     if (settings.debugMode) {
       console.log("[Qdrant Memory] Original filename:", chatFile)
@@ -765,8 +860,8 @@ async function loadChatFile(characterName, chatFile) {
     if (settings.debugMode) {
       console.log("[Qdrant Memory] Loading with params:", {
         ch_name: characterName,
-        file_name: fileNameWithoutExt, // Use the variable without extension!
-        avatar_url: avatar_url,
+        file_name: fileNameWithoutExt,  // Use the variable without extension!
+        avatar_url: avatar_url
       })
     }
 
@@ -794,7 +889,7 @@ async function loadChatFile(characterName, chatFile) {
     }
 
     const chatData = await response.json()
-
+    
     if (settings.debugMode) {
       console.log("[Qdrant Memory] Raw chat data received:", chatData)
       console.log("[Qdrant Memory] Chat data type:", typeof chatData)
@@ -803,7 +898,7 @@ async function loadChatFile(characterName, chatFile) {
         console.log("[Qdrant Memory] Chat data keys:", Object.keys(chatData))
       }
     }
-
+    
     // Handle different response formats
     let messages = null
     if (Array.isArray(chatData)) {
@@ -812,16 +907,16 @@ async function loadChatFile(characterName, chatFile) {
       messages = chatData.chat
     } else if (chatData && Array.isArray(chatData.messages)) {
       messages = chatData.messages
-    } else if (chatData && typeof chatData === "object") {
+    } else if (chatData && typeof chatData === 'object') {
       // Maybe the entire response is the chat data
       messages = [chatData]
     }
-
+    
     if (settings.debugMode) {
       console.log("[Qdrant Memory] Extracted messages:", messages)
       console.log("[Qdrant Memory] Loaded chat with", messages?.length || 0, "messages")
     }
-
+    
     return messages
   } catch (error) {
     console.error("[Qdrant Memory] Error loading chat file:", error)
