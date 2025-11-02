@@ -176,36 +176,34 @@ function getHeadersFromSillyTavernContext() {
 
 // Get headers for SillyTavern API requests (with CSRF token if available)
 function getSillyTavernHeaders() {
-  const contextHeaders = getHeadersFromSillyTavernContext() || {}
-  const headers = { ...contextHeaders }
-
-  if (!("Content-Type" in headers)) {
-    headers["Content-Type"] = "application/json"
-  }
-
-  if (!("Accept" in headers)) {
-    headers["Accept"] = "application/json"
-  }
-
-  if (!("Origin" in headers)) {
-    headers["Origin"] = window.location.origin
-  }
-
-  if (!("X-Requested-With" in headers)) {
-    headers["X-Requested-With"] = "XMLHttpRequest"
-  }
-
-  const hasCsrfHeader = Object.keys(headers).some((key) =>
-    ["x-csrf-token", "x-csrftoken"].includes(key.toLowerCase())
-  )
-
-  if (!hasCsrfHeader) {
-    const csrfToken = pickFirstCSRFToken()
-
-    if (csrfToken) {
-      headers["X-CSRF-Token"] = csrfToken
-      headers["X-CSRFToken"] = csrfToken
+  // Try to use SillyTavern's built-in method first
+  if (typeof SillyTavern !== "undefined" && SillyTavern.getContext?.getRequestHeaders) {
+    try {
+      return SillyTavern.getContext.getRequestHeaders()
+    } catch (error) {
+      console.warn("[Qdrant Memory] Failed to get ST request headers:", error)
     }
+  }
+  
+  // Fallback to manual headers (may not work with CSRF protection)
+  const headers = {
+    "Content-Type": "application/json",
+    Accept: "application/json",
+    Origin: window.location.origin,
+    "X-Requested-With": "XMLHttpRequest",
+  }
+
+  const csrfToken = pickFirstCSRFToken()
+
+  if (csrfToken) {
+    if (settings.debugMode) {
+      console.log("[Qdrant Memory] Using CSRF token:", csrfToken.substring(0, 10) + "...")
+    }
+    headers["X-CSRF-Token"] = csrfToken
+    headers["X-CSRFToken"] = csrfToken
+    headers["csrf-token"] = csrfToken
+  } else {
+    console.warn("[Qdrant Memory] No CSRF token found - requests may fail")
   }
 
   return headers
