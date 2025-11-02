@@ -81,21 +81,97 @@ function getEmbeddingDimensions() {
   return dimensions[settings.embeddingModel] || 1536
 }
 
+// Helper to safely call potential CSRF token providers
+function tryGetCSRFTokenFromHelpers() {
+  const helperCandidates = [
+    () => (typeof window.getCSRFToken === "function" ? window.getCSRFToken() : null),
+    () => (typeof window.getCsrfToken === "function" ? window.getCsrfToken() : null),
+    () =>
+      typeof window.SillyTavern?.getCSRFToken === "function"
+        ? window.SillyTavern.getCSRFToken()
+        : null,
+    () =>
+      typeof window.SillyTavern?.getCsrfToken === "function"
+        ? window.SillyTavern.getCsrfToken()
+        : null,
+    () =>
+      typeof window.SillyTavern?.extensions?.webui?.getCSRFToken === "function"
+        ? window.SillyTavern.extensions.webui.getCSRFToken()
+        : null,
+    () =>
+      typeof window.SillyTavern?.extensions?.webui?.getCsrfToken === "function"
+        ? window.SillyTavern.extensions.webui.getCsrfToken()
+        : null,
+  ]
+
+  for (const helper of helperCandidates) {
+    try {
+      const token = helper()
+      if (typeof token === "string" && token.trim().length > 0) {
+        return token.trim()
+      }
+    } catch (error) {
+      console.warn("[Qdrant Memory] Failed to read CSRF token from helper:", error)
+    }
+  }
+
+  return null
+}
+
+// Helper to read a cookie value by name
+function getCookie(name) {
+  const cookies = document.cookie ? document.cookie.split(";") : []
+
+  for (const cookie of cookies) {
+    const [cookieName, ...rest] = cookie.trim().split("=")
+    if (cookieName === name) {
+      return decodeURIComponent(rest.join("="))
+    }
+  }
+
+  return null
+}
+
+function pickFirstCSRFToken() {
+  const tokenCandidates = [
+    document.querySelector('meta[name="csrf-token"]')?.content,
+    document.querySelector('meta[name="csrfToken"]')?.content,
+    window.CSRF_TOKEN,
+    window.CSRFToken,
+    window.csrfToken,
+    window.csrf_token,
+    tryGetCSRFTokenFromHelpers(),
+    getCookie("csrftoken"),
+    getCookie("csrf_token"),
+    getCookie("XSRF-TOKEN"),
+    getCookie("XSRF_TOKEN"),
+  ]
+
+  for (const token of tokenCandidates) {
+    if (typeof token === "string" && token.trim().length > 0) {
+      return token.trim()
+    }
+  }
+
+  return null
+}
+
 // Get headers for SillyTavern API requests (with CSRF token if available)
 function getSillyTavernHeaders() {
   const headers = {
     "Content-Type": "application/json",
+    Accept: "application/json",
+    Origin: window.location.origin,
+    "X-Requested-With": "XMLHttpRequest",
   }
-  
-  // Try to get CSRF token from meta tag or global variable
-  const csrfToken = document.querySelector('meta[name="csrf-token"]')?.content 
-                    || window.token 
-                    || window.csrf_token
-  
+
+  const csrfToken = pickFirstCSRFToken()
+
   if (csrfToken) {
     headers["X-CSRF-Token"] = csrfToken
+    headers["X-CSRFToken"] = csrfToken
   }
-  
+
   return headers
 }
 
