@@ -137,6 +137,47 @@ function getCookie(name) {
   return null
 }
 
+// Helper to decode CSRF token from session cookie
+function getCSRFTokenFromSessionCookie() {
+  try {
+    // Look for session cookies that might contain the CSRF token
+    const cookies = document.cookie ? document.cookie.split(";") : []
+    
+    for (const cookie of cookies) {
+      const [cookieName, cookieValue] = cookie.trim().split("=")
+      
+      // Check if this is a session cookie (common patterns)
+      if (cookieName && (cookieName.startsWith('session-') || cookieName === 'session')) {
+        try {
+          // The value might be base64 encoded JSON
+          const decoded = atob(cookieValue.split('.')[0]) // Remove signature if present
+          const sessionData = JSON.parse(decoded)
+          
+          // Check for CSRF token in various formats
+          const token = sessionData.csrfToken || 
+                       sessionData.csrf_token || 
+                       sessionData.csrfSecret ||
+                       sessionData._csrf
+          
+          if (token && typeof token === 'string') {
+            if (settings.debugMode) {
+              console.log(`[Qdrant Memory] Found CSRF token in session cookie: ${cookieName}`)
+            }
+            return token
+          }
+        } catch (e) {
+          // Not a JSON session cookie, continue
+          continue
+        }
+      }
+    }
+  } catch (error) {
+    console.warn("[Qdrant Memory] Error decoding session cookie:", error)
+  }
+  
+  return null
+}
+
 function pickFirstCSRFToken() {
   const tokenCandidates = [
     document.querySelector('meta[name="csrf-token"]')?.content,
@@ -146,6 +187,7 @@ function pickFirstCSRFToken() {
     window.csrfToken,
     window.csrf_token,
     tryGetCSRFTokenFromHelpers(),
+    getCSRFTokenFromSessionCookie(), // NEW: Check session cookie first
     getCookie("csrftoken"),
     getCookie("csrf_token"),
     getCookie("XSRF-TOKEN"),
@@ -1701,6 +1743,7 @@ function createSettingsUI() {
       console.log("[Qdrant Memory] Token sources checked:")
       console.log("  - Meta tags:", document.querySelector('meta[name="csrf-token"]')?.content ? "Found" : "Not found")
       console.log("  - Window vars:", window.CSRF_TOKEN || window.CSRFToken || window.csrfToken || window.csrf_token ? "Found" : "Not found")
+      console.log("  - Session cookie:", getCSRFTokenFromSessionCookie() ? "Found ✓" : "Not found")
       console.log("  - Cookies:", getCookie("csrftoken") || getCookie("XSRF-TOKEN") ? "Found" : "Not found")
       console.log("  - LocalStorage:", localStorage.getItem('csrf_token') ? "Found" : "Not found")
     } else {
@@ -1711,6 +1754,7 @@ function createSettingsUI() {
       console.error("[Qdrant Memory] CSRF token not found. Checked:")
       console.error("  - Meta tags")
       console.error("  - Window variables")
+      console.error("  - Session cookie")
       console.error("  - Cookies")
       console.error("  - LocalStorage")
       console.error("  - SessionStorage")
