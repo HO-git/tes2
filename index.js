@@ -176,26 +176,47 @@ function getHeadersFromSillyTavernContext() {
 
 // Get headers for SillyTavern API requests (with CSRF token if available)
 function getSillyTavernHeaders() {
-  // Try to use SillyTavern's built-in method first (THIS IS THE KEY!)
-  if (typeof SillyTavern !== "undefined" && SillyTavern.getContext?.getRequestHeaders) {
-    try {
-      const headers = SillyTavern.getContext.getRequestHeaders()
-      
-      if (settings.debugMode) {
-        console.log("[Qdrant Memory] Using SillyTavern's built-in headers")
-        console.log("[Qdrant Memory] Headers:", headers)
+  // Debug: Check what's available
+  if (settings.debugMode) {
+    console.log("[Qdrant Memory] === Checking available ST methods ===")
+    console.log("[Qdrant Memory] window.SillyTavern exists?", typeof SillyTavern !== "undefined")
+    if (typeof SillyTavern !== "undefined") {
+      console.log("[Qdrant Memory] SillyTavern keys:", Object.keys(SillyTavern))
+      console.log("[Qdrant Memory] SillyTavern.getContext exists?", typeof SillyTavern.getContext === "function")
+      if (typeof SillyTavern.getContext === "function") {
+        const ctx = SillyTavern.getContext()
+        console.log("[Qdrant Memory] Context keys:", Object.keys(ctx))
+        console.log("[Qdrant Memory] getRequestHeaders exists?", typeof ctx.getRequestHeaders === "function")
       }
-      
-      return headers
+    }
+  }
+
+  // Try multiple possible locations for the header builder
+  const headerBuilders = [
+    () => SillyTavern?.getContext?.()?.getRequestHeaders?.(),
+    () => SillyTavern?.getRequestHeaders?.(),
+    () => window.getRequestHeaders?.(),
+    () => getContext()?.getRequestHeaders?.(),
+  ]
+
+  for (const builder of headerBuilders) {
+    try {
+      const headers = builder()
+      if (headers && typeof headers === "object") {
+        if (settings.debugMode) {
+          console.log("[Qdrant Memory] ✓ Found working header builder!")
+          console.log("[Qdrant Memory] Headers:", headers)
+        }
+        return headers
+      }
     } catch (error) {
-      console.warn("[Qdrant Memory] Failed to get ST request headers:", error)
-      // Fall through to manual method
+      // Continue to next method
     }
   }
   
-  // Fallback to manual headers (may not work with CSRF protection)
+  // None of the built-in methods worked
   if (settings.debugMode) {
-    console.warn("[Qdrant Memory] SillyTavern.getContext.getRequestHeaders() not available, using fallback")
+    console.warn("[Qdrant Memory] No built-in header builder found, using manual fallback")
   }
   
   const headers = {
