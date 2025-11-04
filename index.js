@@ -56,32 +56,32 @@ const EMBEDDING_MODEL_OPTIONS = {
   ],
   openrouter: [
     {
-      value: "qwen/qwen-embedding-3-large",
-      label: "Qwen: Qwen3 Embedding 8B",
+      value: "openai/text-embedding-3-large",
+      label: "OpenAI: Text Embedding 3 Large",
     },
     {
       value: "openai/text-embedding-3-small",
       label: "OpenAI: Text Embedding 3 Small",
     },
     {
-      value: "google/gemini-embedding-001",
-      label: "Google: Gemini Embedding 001",
+      value: "openai/text-embedding-ada-002",
+      label: "OpenAI: Text Embedding Ada 002",
     },
     {
-      value: "openai/text-embedding-3-large",
-      label: "OpenAI: Text Embedding 3 Large",
+      value: "qwen/qwen3-embedding-8b",
+      label: "Qwen: Qwen3 Embedding 8B",
     },
     {
       value: "mistralai/codestral-embed-2505",
       label: "Mistral: Codestral Embed 2505",
     },
     {
-      value: "openai/text-embedding-ada-002",
-      label: "OpenAI: Text Embedding Ada 002",
+      value: "mistralai/mistral-embed-2312",
+      label: "Mistral: Mistral Embed 2312",
     },
     {
-      value: "mistralai/mistral-embed",
-      label: "Mistral: Mistral Embed 2312",
+      value: "google/gemini-embedding-001",
+      label: "Google: Gemini Embedding 001",
     },
   ],
 }
