@@ -1667,7 +1667,7 @@ function createSettingsUI() {
                 <select id="qdrant_embedding_provider" class="text_pole" style="width: 100%; margin-top: 5px;">
                     <option value="openai" ${settings.embeddingProvider === "openai" ? "selected" : ""}>OpenAI</option>
                     <option value="openrouter" ${settings.embeddingProvider === "openrouter" ? "selected" : ""}>OpenRouter</option>
-                    <option value="local" ${settings.embeddingProvider === "local" ? "selected" : ""}>Local endpoint</option>
+                    <option value="local" ${settings.embeddingProvider === "local" ? "selected" : ""}>Local/custom endpoint</option>
                 </select>
                 <small style="color: #666;">Choose the API used for generating embeddings</small>
             </div>
@@ -1687,7 +1687,7 @@ function createSettingsUI() {
             </div>
 
             <div id="qdrant_local_url_group" style="margin: 10px 0; display: none;">
-                <label><strong>Local Embedding URL:</strong></label>
+                <label><strong>Embedding URL:</strong></label>
                 <input type="text" id="qdrant_local_url" class="text_pole" value="${settings.localEmbeddingUrl}"
                        placeholder="http://localhost:11434/api/embeddings"
                        style="width: 100%; margin-top: 5px;" />
