@@ -39,6 +39,70 @@ let messageBuffer = []
 let lastMessageTime = 0
 let chunkTimer = null
 
+const EMBEDDING_MODEL_OPTIONS = {
+  openai: [
+    {
+      value: "text-embedding-3-large",
+      label: "text-embedding-3-large (best quality)",
+    },
+    {
+      value: "text-embedding-3-small",
+      label: "text-embedding-3-small (faster)",
+    },
+    {
+      value: "text-embedding-ada-002",
+      label: "text-embedding-ada-002 (legacy)",
+    },
+  ],
+  openrouter: [
+    {
+      value: "qwen/qwen-embedding-3-large",
+      label: "Qwen: Qwen3 Embedding 8B",
+    },
+    {
+      value: "openai/text-embedding-3-small",
+      label: "OpenAI: Text Embedding 3 Small",
+    },
+    {
+      value: "google/gemini-embedding-001",
+      label: "Google: Gemini Embedding 001",
+    },
+    {
+      value: "openai/text-embedding-3-large",
+      label: "OpenAI: Text Embedding 3 Large",
+    },
+    {
+      value: "mistralai/codestral-embed-2505",
+      label: "Mistral: Codestral Embed 2505",
+    },
+    {
+      value: "openai/text-embedding-ada-002",
+      label: "OpenAI: Text Embedding Ada 002",
+    },
+    {
+      value: "mistralai/mistral-embed",
+      label: "Mistral: Mistral Embed 2312",
+    },
+  ],
+}
+
+const DEFAULT_MODEL_BY_PROVIDER = {
+  openai: "text-embedding-3-large",
+  openrouter: EMBEDDING_MODEL_OPTIONS.openrouter[0].value,
+}
+
+const OPENROUTER_MODEL_ALIASES = {
+  "text-embedding-3-large": "openai/text-embedding-3-large",
+  "text-embedding-3-small": "openai/text-embedding-3-small",
+  "text-embedding-ada-002": "openai/text-embedding-ada-002",
+}
+
+const OPENAI_MODEL_ALIASES = {
+  "openai/text-embedding-3-large": "text-embedding-3-large",
+  "openai/text-embedding-3-small": "text-embedding-3-small",
+  "openai/text-embedding-ada-002": "text-embedding-ada-002",
+}
+
 // Load settings from localStorage
 function loadSettings() {
   const saved = localStorage.getItem(extensionName)
@@ -80,6 +144,9 @@ function getEmbeddingDimensions() {
     "text-embedding-3-large": 3072,
     "text-embedding-3-small": 1536,
     "text-embedding-ada-002": 1536,
+    "openai/text-embedding-3-large": 3072,
+    "openai/text-embedding-3-small": 1536,
+    "openai/text-embedding-ada-002": 1536,
   }
   return dimensions[settings.embeddingModel] || 1536
 }
@@ -1627,7 +1694,7 @@ function createSettingsUI() {
                 <small style="color: #666;">Endpoint that accepts OpenAI-compatible embedding requests</small>
             </div>
 
-            <div style="margin: 10px 0;">
+            <div id="qdrant_embedding_model_group" style="margin: 10px 0;">
                 <label><strong>Embedding Model:</strong></label>
                 <select id="qdrant_embedding_model" class="text_pole" style="width: 100%; margin-top: 5px;">
                     <option value="text-embedding-3-large" ${settings.embeddingModel === "text-embedding-3-large" ? "selected" : ""}>text-embedding-3-large (best quality)</option>
@@ -1750,15 +1817,57 @@ function createSettingsUI() {
     window.applyInlineDrawerListeners()
   }
 
+  function updateEmbeddingModelOptions(provider) {
+    const models = EMBEDDING_MODEL_OPTIONS[provider] || EMBEDDING_MODEL_OPTIONS.openai
+    const $modelSelect = $("#qdrant_embedding_model")
+    let previousValue = settings.embeddingModel
+    if (provider === "openrouter" && OPENROUTER_MODEL_ALIASES[previousValue]) {
+      previousValue = OPENROUTER_MODEL_ALIASES[previousValue]
+      settings.embeddingModel = previousValue
+    } else if (provider === "openai" && OPENAI_MODEL_ALIASES[previousValue]) {
+      previousValue = OPENAI_MODEL_ALIASES[previousValue]
+      settings.embeddingModel = previousValue
+    }
+    let matched = false
+
+    $modelSelect.empty()
+
+    models.forEach((model) => {
+      const isSelected = model.value === previousValue
+      if (isSelected) {
+        matched = true
+      }
+
+      const optionHtml = `<option value="${model.value}"${
+        isSelected ? " selected" : ""
+      }>${model.label}</option>`
+      $modelSelect.append(optionHtml)
+    })
+
+    if (!matched && models.length > 0) {
+      const fallback = DEFAULT_MODEL_BY_PROVIDER[provider] || models[0].value
+      settings.embeddingModel = fallback
+      $modelSelect.val(settings.embeddingModel)
+    }
+  }
+
   function updateEmbeddingProviderUI() {
     const provider = settings.embeddingProvider || "openai"
     const $openAIGroup = $("#qdrant_openai_key_group")
     const $openRouterGroup = $("#qdrant_openrouter_key_group")
     const $localGroup = $("#qdrant_local_url_group")
+    const $modelGroup = $("#qdrant_embedding_model_group")
 
     $openAIGroup.toggle(provider === "openai")
     $openRouterGroup.toggle(provider === "openrouter")
     $localGroup.toggle(provider === "local")
+
+    const showModelSelect = provider !== "local"
+    $modelGroup.toggle(showModelSelect)
+
+    if (showModelSelect) {
+      updateEmbeddingModelOptions(provider)
+    }
   }
 
   // Event handlers
