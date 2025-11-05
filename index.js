@@ -13,6 +13,7 @@ const defaultSettings = {
   openaiApiKey: "",
   openRouterApiKey: "",
   localEmbeddingUrl: "",
+  localEmbeddingApiKey: "",
   embeddingModel: "text-embedding-3-large",
   memoryLimit: 5,
   scoreThreshold: 0.3,
@@ -448,6 +449,9 @@ async function generateEmbedding(text) {
       }
     } else if (provider === "local") {
       url = settings.localEmbeddingUrl.trim()
+      if (settings.localEmbeddingApiKey && settings.localEmbeddingApiKey.trim()) {
+        headers.Authorization = `Bearer ${settings.localEmbeddingApiKey.trim()}`
+      }
     } else {
       console.error(`[Qdrant Memory] Unsupported embedding provider: ${provider}`)
       return null
@@ -1693,6 +1697,14 @@ function createSettingsUI() {
                 <small style="color: #666;">Endpoint that accepts OpenAI-compatible embedding requests</small>
             </div>
 
+            <div id="qdrant_local_api_key_group" style="margin: 10px 0; display: none;">
+                <label><strong>Embedding API Key (optional):</strong></label>
+                <input type="password" id="qdrant_local_api_key" class="text_pole" value="${settings.localEmbeddingApiKey}"
+                       placeholder="Bearer token for local endpoint"
+                       style="width: 100%; margin-top: 5px;" />
+                <small style="color: #666;">Used if your local/custom endpoint requires authentication</small>
+            </div>
+
             <div id="qdrant_embedding_model_group" style="margin: 10px 0;">
                 <label><strong>Embedding Model:</strong></label>
                 <select id="qdrant_embedding_model" class="text_pole" style="width: 100%; margin-top: 5px;">
@@ -1855,11 +1867,13 @@ function createSettingsUI() {
     const $openAIGroup = $("#qdrant_openai_key_group")
     const $openRouterGroup = $("#qdrant_openrouter_key_group")
     const $localGroup = $("#qdrant_local_url_group")
+    const $localApiKeyGroup = $("#qdrant_local_api_key_group")
     const $modelGroup = $("#qdrant_embedding_model_group")
 
     $openAIGroup.toggle(provider === "openai")
     $openRouterGroup.toggle(provider === "openrouter")
     $localGroup.toggle(provider === "local")
+    $localApiKeyGroup.toggle(provider === "local")
 
     const showModelSelect = provider !== "local"
     $modelGroup.toggle(showModelSelect)
@@ -1897,6 +1911,10 @@ function createSettingsUI() {
 
   $("#qdrant_local_url").on("input", function () {
     settings.localEmbeddingUrl = $(this).val()
+  })
+
+  $("#qdrant_local_api_key").on("input", function () {
+    settings.localEmbeddingApiKey = $(this).val()
   })
 
   $("#qdrant_embedding_model").on("change", function () {
