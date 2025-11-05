@@ -1,6 +1,6 @@
 // Qdrant Memory Extension for SillyTavern
 // This extension retrieves relevant memories from Qdrant and injects them into conversations
-// Version 3.1.0 - Added temporal context with visible dates in memory chunks
+// Version 3.1.1 - Fixed date/timestamp handling across all sources
 
 const extensionName = "qdrant-memory"
 
@@ -100,6 +100,78 @@ const OPENAI_MODEL_ALIASES = {
   "openai/text-embedding-3-small": "text-embedding-3-small",
   "openai/text-embedding-ada-002": "text-embedding-ada-002",
 }
+
+// ============================================================================
+// DATE/TIMESTAMP NORMALIZATION
+// ============================================================================
+
+/**
+ * Normalizes various date formats to Unix timestamp in milliseconds
+ * Handles:
+ * - Millisecond timestamps (e.g., 1730000000000)
+ * - Second timestamps (e.g., 1730000000)
+ * - Date objects
+ * - Date strings (e.g., "October 20, 2025 12:16pm")
+ * 
+ * @param {number|string|Date} date - The date to normalize
+ * @returns {number} Unix timestamp in milliseconds
+ */
+function normalizeTimestamp(date) {
+  // Already a valid millisecond timestamp
+  if (typeof date === 'number' && date > 1000000000000) {
+    return date;
+  }
+  
+  // Timestamp in seconds - convert to milliseconds
+  if (typeof date === 'number' && date > 1000000000 && date < 1000000000000) {
+    return date * 1000;
+  }
+  
+  // Date object
+  if (date instanceof Date) {
+    const timestamp = date.getTime();
+    if (!isNaN(timestamp)) {
+      return timestamp;
+    }
+  }
+  
+  // String date - try to parse it
+  if (typeof date === 'string' && date.trim()) {
+    const parsed = new Date(date);
+    const timestamp = parsed.getTime();
+    if (!isNaN(timestamp)) {
+      return timestamp;
+    }
+  }
+  
+  // Fallback to current time
+  if (settings.debugMode) {
+    console.warn('[Qdrant Memory] Could not normalize timestamp, using current time. Input:', date);
+  }
+  return Date.now();
+}
+
+/**
+ * Formats a timestamp as YYYY-MM-DD for display in memory chunks
+ * @param {number} timestamp - Unix timestamp in milliseconds
+ * @returns {string} Formatted date string
+ */
+function formatDateForChunk(timestamp) {
+  try {
+    const dateObj = new Date(timestamp);
+    if (isNaN(dateObj.getTime())) {
+      throw new Error('Invalid date');
+    }
+    return dateObj.toISOString().split('T')[0]; // YYYY-MM-DD format
+  } catch (e) {
+    console.warn('[Qdrant Memory] Error formatting date:', e, 'timestamp:', timestamp);
+    return new Date().toISOString().split('T')[0]; // Fallback to today
+  }
+}
+
+// ============================================================================
+// SETTINGS MANAGEMENT
+// ============================================================================
 
 // Load settings from localStorage
 function loadSettings() {
@@ -252,6 +324,10 @@ function getEmbeddingProviderError() {
 
   return null
 }
+
+// ============================================================================
+// HTTP HEADERS AND CSRF TOKEN HANDLING
+// ============================================================================
 
 // Helper to safely call potential CSRF token providers
 function tryGetCSRFTokenFromHelpers() {
@@ -427,6 +503,10 @@ function getQdrantHeaders() {
   return headers
 }
 
+// ============================================================================
+// QDRANT COLLECTION MANAGEMENT
+// ============================================================================
+
 // Check if collection exists
 async function collectionExists(collectionName) {
   try {
@@ -524,6 +604,10 @@ async function ensureCollection(characterName, vectorSize) {
   return await createCollection(collectionName, vectorSize)
 }
 
+// ============================================================================
+// EMBEDDING GENERATION
+// ============================================================================
+
 // Generate embedding using the configured provider
 async function generateEmbedding(text) {
   const providerError = getEmbeddingProviderError()
@@ -607,6 +691,10 @@ async function generateEmbedding(text) {
   }
 }
 
+// ============================================================================
+// MEMORY SEARCH AND RETRIEVAL
+// ============================================================================
+
 // Search Qdrant for relevant memories
 async function searchMemories(query, characterName) {
   if (!settings.enabled) return []
@@ -635,9 +723,10 @@ async function searchMemories(query, characterName) {
       const retainIndex = chat.length - settings.retainRecentMessages
       const retainMessage = chat[retainIndex]
       if (retainMessage && retainMessage.send_date) {
-        timestampThreshold = retainMessage.send_date
+        // FIXED: Normalize the timestamp before using it
+        timestampThreshold = normalizeTimestamp(retainMessage.send_date)
         if (settings.debugMode) {
-          console.log(`[Qdrant Memory] Excluding messages newer than timestamp: ${timestampThreshold}`)
+          console.log(`[Qdrant Memory] Excluding messages newer than timestamp: ${timestampThreshold} (${formatDateForChunk(timestampThreshold)})`)
         }
       }
     }
@@ -700,19 +789,37 @@ async function searchMemories(query, characterName) {
   }
 }
 
-// Process save queue
-async function processSaveQueue() {
-  if (processingSaveQueue || saveQueue.length === 0) return
+// Format memories for display
+const MAX_MEMORY_LENGTH = 1500 // adjust per your preference
 
-  processingSaveQueue = true
+function formatMemories(memories) {
+  if (!memories || memories.length === 0) return ""
 
-  while (saveQueue.length > 0) {
-    const item = saveQueue.shift()
-    await saveMessageToQdrant(item.text, item.characterName, item.isUser, item.messageId)
-  }
+  let formatted = "\n[Past chat memories]\n\n"
 
-  processingSaveQueue = false
+  memories.forEach((memory) => {
+    const payload = memory.payload
+
+    let speakerLabel
+    if (payload.isChunk) {
+      speakerLabel = `Conversation (${payload.speakers})`
+    } else {
+      speakerLabel = payload.speaker === "user" ? "You said" : "Character said"
+    }
+
+    let text = payload.text.replace(/\n/g, " ") // flatten newlines
+
+    const score = (memory.score * 100).toFixed(0)
+
+    formatted += `• ${speakerLabel}: "${text}" (score: ${score}%)\n\n`
+  })
+
+  return formatted
 }
+
+// ============================================================================
+// MESSAGE CHUNKING AND BUFFERING
+// ============================================================================
 
 function getChatParticipants() {
   const context = getContext()
@@ -767,13 +874,8 @@ function createChunkFromBuffer() {
 
   // Format date prefix
   let finalText = chunkText.trim()
-  try {
-    const dateObj = new Date(currentTimestamp)
-    const dateStr = dateObj.toISOString().split("T")[0] // YYYY-MM-DD format
-    finalText = `[${dateStr}]\n${finalText}`
-  } catch (e) {
-    console.warn("[Qdrant Memory] Error formatting date:", e)
-  }
+  const dateStr = formatDateForChunk(currentTimestamp)
+  finalText = `[${dateStr}]\n${finalText}`
 
   return {
     text: finalText,
@@ -818,11 +920,10 @@ async function saveChunkToQdrant(chunk, participants) {
         return false
       }
 
-      // Add character name to payload for this specific save
-      const characterPayload = {
-        ...payload,
-        character: characterName,
-      }
+      // Add character name to payload only if using shared collection
+      const characterPayload = settings.usePerCharacterCollections 
+        ? payload 
+        : { ...payload, character: characterName }
 
       // Save to Qdrant
       const response = await fetch(`${settings.qdrantUrl}/collections/${collectionName}/points`, {
@@ -947,104 +1048,35 @@ function bufferMessage(text, characterName, isUser, messageId) {
   }
 }
 
-// Format memories for display
-const MAX_MEMORY_LENGTH = 1500 // adjust per your preference
-
-function formatMemories(memories) {
-  if (!memories || memories.length === 0) return ""
-
-  let formatted = "\n[Past chat memories]\n\n"
-
-  memories.forEach((memory) => {
-    const payload = memory.payload
-
-    let speakerLabel
-    if (payload.isChunk) {
-      speakerLabel = `Conversation (${payload.speakers})`
-    } else {
-      speakerLabel = payload.speaker === "user" ? "You said" : "Character said"
-    }
-
-    let text = payload.text.replace(/\n/g, " ") // flatten newlines
-
-    const score = (memory.score * 100).toFixed(0)
-
-    formatted += `• ${speakerLabel}: "${text}" (score: ${score}%)\n\n`
-  })
-
-  return formatted
-}
-
-// Get current context
-function getContext() {
-  const SillyTavern = window.SillyTavern
-  const $ = window.$
-  const toastr = window.toastr
-
-  if (typeof SillyTavern !== "undefined" && SillyTavern.getContext) {
-    return SillyTavern.getContext()
-  }
-  return {
-    chat: window.chat || [],
-    name2: window.name2 || "",
-    characters: window.characters || [],
-  }
-}
-
-// Save message to Qdrant
-async function saveMessageToQdrant(text, characterName, isUser, messageId) {
-  // Implementation for saving message to Qdrant
-}
-
-// Generate a unique UUID
-function generateUUID() {
-  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
-    var r = (Math.random() * 16) | 0,
-      v = c == "x" ? r : (r & 0x3) | 0x8
-    return v.toString(16)
-  })
-}
-
 // ============================================================================
-// CHAT INDEXING FUNCTIONS - FIXED ENDPOINTS
+// CHAT INDEXING FUNCTIONS
 // ============================================================================
 
 async function getCharacterChats(characterName) {
   try {
     const context = getContext()
 
-    console.log("[Qdrant Memory] Getting chats for character:", characterName)
-    console.log("[Qdrant Memory] Context characters:", context.characters)
+    if (settings.debugMode) {
+      console.log("[Qdrant Memory] Getting chats for character:", characterName)
+    }
 
     // Try to get the character's avatar URL
     let avatar_url = `${characterName}.png`
     if (context.characters && Array.isArray(context.characters)) {
       const char = context.characters.find((c) => c.name === characterName)
-      console.log("[Qdrant Memory] Found character object:", char)
       if (char && char.avatar) {
         avatar_url = char.avatar
-        console.log("[Qdrant Memory] Using avatar from character:", avatar_url)
-      } else {
-        console.log("[Qdrant Memory] No avatar in character object, trying default")
       }
     }
 
-    console.log("[Qdrant Memory] Final avatar_url:", avatar_url)
-
-    // ✅ FIXED: Use correct SillyTavern endpoint with credentials for authenticated instances
     const response = await fetch("/api/characters/chats", {
       method: "POST",
       headers: getSillyTavernHeaders(),
-      credentials: "include", // Include cookies for authentication
+      credentials: "include",
       body: JSON.stringify({
         avatar_url: avatar_url,
       }),
     })
-
-    if (settings.debugMode) {
-      console.log("[Qdrant Memory] Response status:", response.status)
-      console.log("[Qdrant Memory] Response ok:", response.ok)
-    }
 
     if (!response.ok) {
       const errorText = await response.text()
@@ -1054,25 +1086,16 @@ async function getCharacterChats(characterName) {
     }
 
     const data = await response.json()
-    
-    if (settings.debugMode) {
-      console.log("[Qdrant Memory] Received data:", data)
-    }
 
     // Handle different response formats - extract just the filenames
     let chatFiles = []
     
     if (Array.isArray(data)) {
-      // If it's an array of strings, use directly
       if (typeof data[0] === 'string') {
         chatFiles = data
-      }
-      // If it's an array of objects with file_name
-      else if (data[0] && data[0].file_name) {
+      } else if (data[0] && data[0].file_name) {
         chatFiles = data.map(item => item.file_name)
-      }
-      // If it's an array of other objects, try to extract filename
-      else {
+      } else {
         chatFiles = data.map(item => {
           if (typeof item === 'string') return item
           if (item.file_name) return item.file_name
@@ -1103,17 +1126,12 @@ async function getCharacterChats(characterName) {
     return chatFiles
   } catch (error) {
     console.error("[Qdrant Memory] Error getting character chats:", error)
-    if (settings.debugMode) {
-      console.error("[Qdrant Memory] Full error:", error.stack)
-    }
     return []
   }
 }
 
 async function loadChatFile(characterName, chatFile) {
   try {
-    const context = getContext()
-
     if (settings.debugMode) {
       console.log("[Qdrant Memory] Loading chat file:", chatFile, "for character:", characterName)
     }
@@ -1128,14 +1146,10 @@ async function loadChatFile(characterName, chatFile) {
       }
     }
 
-    // CRITICAL: Remove .jsonl extension as the API adds it back
-    // The endpoint does: `${file_name}.jsonl`, so we must send without extension
+    // Remove .jsonl extension as the API adds it back
     const fileNameWithoutExt = chatFile.replace(/\.jsonl$/, '')
 
-    if (settings.debugMode) {
-      console.log("[Qdrant Memory] Original filename:", chatFile)
-      console.log("[Qdrant Memory] Sending without extension:", fileNameWithoutExt)
-    }
+    const context = getContext()
 
     // Try to get the character's avatar URL
     let avatar_url = `${characterName}.png`
@@ -1146,29 +1160,16 @@ async function loadChatFile(characterName, chatFile) {
       }
     }
 
-    if (settings.debugMode) {
-      console.log("[Qdrant Memory] Loading with params:", {
-        ch_name: characterName,
-        file_name: fileNameWithoutExt,  // Use the variable without extension!
-        avatar_url: avatar_url
-      })
-    }
-
-    // ✅ FIXED: Use correct SillyTavern endpoint with credentials
     const response = await fetch("/api/chats/get", {
       method: "POST",
       headers: getSillyTavernHeaders(),
-      credentials: "include", // Include cookies for authentication
+      credentials: "include",
       body: JSON.stringify({
         ch_name: characterName,
-        file_name: fileNameWithoutExt, // Send WITHOUT .jsonl as API adds it
+        file_name: fileNameWithoutExt,
         avatar_url: avatar_url,
       }),
     })
-
-    if (settings.debugMode) {
-      console.log("[Qdrant Memory] Load chat response status:", response.status)
-    }
 
     if (!response.ok) {
       const errorText = await response.text()
@@ -1179,15 +1180,6 @@ async function loadChatFile(characterName, chatFile) {
 
     const chatData = await response.json()
     
-    if (settings.debugMode) {
-      console.log("[Qdrant Memory] Raw chat data received:", chatData)
-      console.log("[Qdrant Memory] Chat data type:", typeof chatData)
-      console.log("[Qdrant Memory] Is array?", Array.isArray(chatData))
-      if (chatData) {
-        console.log("[Qdrant Memory] Chat data keys:", Object.keys(chatData))
-      }
-    }
-    
     // Handle different response formats
     let messages = null
     if (Array.isArray(chatData)) {
@@ -1197,21 +1189,16 @@ async function loadChatFile(characterName, chatFile) {
     } else if (chatData && Array.isArray(chatData.messages)) {
       messages = chatData.messages
     } else if (chatData && typeof chatData === 'object') {
-      // Maybe the entire response is the chat data
       messages = [chatData]
     }
     
     if (settings.debugMode) {
-      console.log("[Qdrant Memory] Extracted messages:", messages)
       console.log("[Qdrant Memory] Loaded chat with", messages?.length || 0, "messages")
     }
     
     return messages
   } catch (error) {
     console.error("[Qdrant Memory] Error loading chat file:", error)
-    if (settings.debugMode) {
-      console.error("[Qdrant Memory] Full error:", error.stack)
-    }
     return null
   }
 }
@@ -1261,13 +1248,20 @@ function createChunksFromChat(messages, characterName) {
     if (isUser && !settings.saveUserMessages) continue
     if (!isUser && !settings.saveCharacterMessages) continue
 
+    // FIXED: Normalize send_date before using it
+    const normalizedDate = normalizeTimestamp(msg.send_date || Date.now())
+    
+    if (settings.debugMode) {
+      console.log("[Qdrant Memory] Message date - raw:", msg.send_date, "normalized:", normalizedDate, "formatted:", formatDateForChunk(normalizedDate))
+    }
+
     // Create message object
     const messageObj = {
       text: text,
       characterName: characterName,
       isUser: isUser,
-      messageId: `${characterName}_${msg.send_date}_${messages.indexOf(msg)}`,
-      timestamp: msg.send_date || Date.now(),
+      messageId: `${characterName}_${normalizedDate}_${messages.indexOf(msg)}`,
+      timestamp: normalizedDate, // Use normalized timestamp
     }
 
     const messageSize = text.length + characterName.length + 4
@@ -1312,6 +1306,7 @@ function createChunkFromMessages(messages) {
     const line = `${speaker}: ${msg.text}\n`
     chunkText += line
 
+    // FIXED: All timestamps are already normalized in createChunksFromChat
     if (msg.timestamp < oldestTimestamp) {
       oldestTimestamp = msg.timestamp
     }
@@ -1320,13 +1315,8 @@ function createChunkFromMessages(messages) {
   // Format date prefix for the chunk
   let finalText = chunkText.trim()
   if (oldestTimestamp !== Number.POSITIVE_INFINITY) {
-    try {
-      const dateObj = new Date(oldestTimestamp)
-      const dateStr = dateObj.toISOString().split("T")[0] // YYYY-MM-DD format
-      finalText = `[${dateStr}]\n${finalText}`
-    } catch (e) {
-      console.warn("[Qdrant Memory] Invalid timestamp for chunk:", oldestTimestamp, e)
-    }
+    const dateStr = formatDateForChunk(oldestTimestamp)
+    finalText = `[${dateStr}]\n${finalText}`
   }
 
   return {
@@ -1490,7 +1480,7 @@ async function indexCharacterChats() {
 }
 
 // ============================================================================
-// GENERATION INTERCEPTOR - This runs BEFORE messages are sent to the LLM
+// GENERATION INTERCEPTOR
 // ============================================================================
 
 globalThis.qdrantMemoryInterceptor = async (chat, contextSize, abort, type) => {
@@ -1593,8 +1583,11 @@ function onMessageSent() {
     // Get the last message
     const lastMessage = chat[chat.length - 1]
 
+    // FIXED: Normalize send_date for messageId
+    const normalizedDate = normalizeTimestamp(lastMessage.send_date || Date.now())
+    
     // Create a unique ID for this message
-    const messageId = `${characterName}_${lastMessage.send_date}_${chat.length}`
+    const messageId = `${characterName}_${normalizedDate}_${chat.length}`
 
     if (lastMessage.mes && lastMessage.mes.trim().length > 0) {
       const isUser = lastMessage.is_user || false
@@ -1658,7 +1651,6 @@ async function showMemoryViewer() {
   }
 
   const count = info.points_count || 0
-  const vectors = info.vectors_count || 0
 
   // Create a simple modal using jQuery
   const modalHtml = `
@@ -1731,7 +1723,51 @@ async function showMemoryViewer() {
   })
 }
 
-// Create settings UI
+// ============================================================================
+// UTILITY FUNCTIONS
+// ============================================================================
+
+// Get current context
+function getContext() {
+  const SillyTavern = window.SillyTavern
+  
+  if (typeof SillyTavern !== "undefined" && SillyTavern.getContext) {
+    return SillyTavern.getContext()
+  }
+  return {
+    chat: window.chat || [],
+    name2: window.name2 || "",
+    characters: window.characters || [],
+  }
+}
+
+// Generate a unique UUID
+function generateUUID() {
+  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
+    var r = (Math.random() * 16) | 0,
+      v = c == "x" ? r : (r & 0x3) | 0x8
+    return v.toString(16)
+  })
+}
+
+// Process save queue (legacy - currently unused)
+async function processSaveQueue() {
+  if (processingSaveQueue || saveQueue.length === 0) return
+
+  processingSaveQueue = true
+
+  while (saveQueue.length > 0) {
+    const item = saveQueue.shift()
+    // saveMessageToQdrant function removed - now using chunking system
+  }
+
+  processingSaveQueue = false
+}
+
+// ============================================================================
+// SETTINGS UI
+// ============================================================================
+
 function createSettingsUI() {
   const settingsHtml = `
         <div class="qdrant-memory-settings">
@@ -2144,7 +2180,10 @@ function createSettingsUI() {
   })
 }
 
-// Extension initialization
+// ============================================================================
+// EXTENSION INITIALIZATION
+// ============================================================================
+
 window.jQuery(async () => {
   loadSettings()
   createSettingsUI()
@@ -2170,5 +2209,5 @@ window.jQuery(async () => {
     }, 2000)
   }
 
-  console.log("[Qdrant Memory] Extension loaded successfully (v3.1.0 - temporal context with dates)")
+  console.log("[Qdrant Memory] Extension loaded successfully (v3.1.1 - temporal context with dates)")
 })
