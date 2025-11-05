@@ -147,6 +147,10 @@ function getEmbeddingDimensions() {
     "openai/text-embedding-3-large": 3072,
     "openai/text-embedding-3-small": 1536,
     "openai/text-embedding-ada-002": 1536,
+    "qwen/qwen3-embedding-8b": 4096,
+    "mistralai/codestral-embed-2505": 1024,
+    "mistralai/mistral-embed-2312": 1024,
+    "google/gemini-embedding-001": 3072,
   }
   return dimensions[settings.embeddingModel] || 1536
 }
