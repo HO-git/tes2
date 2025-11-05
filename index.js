@@ -72,10 +72,6 @@ const EMBEDDING_MODEL_OPTIONS = {
       label: "Qwen: Qwen3 Embedding 8B",
     },
     {
-      value: "mistralai/codestral-embed-2505",
-      label: "Mistral: Codestral Embed 2505",
-    },
-    {
       value: "mistralai/mistral-embed-2312",
       label: "Mistral: Mistral Embed 2312",
     },
@@ -148,7 +144,6 @@ function getEmbeddingDimensions() {
     "openai/text-embedding-3-small": 1536,
     "openai/text-embedding-ada-002": 1536,
     "qwen/qwen3-embedding-8b": 4096,
-    "mistralai/codestral-embed-2505": 1024,
     "mistralai/mistral-embed-2312": 1024,
     "google/gemini-embedding-001": 3072,
   }
