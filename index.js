@@ -139,38 +139,16 @@ function getCollectionName(characterName) {
 }
 
 // Get embedding dimensions for the selected model
-async function getEmbeddingDimensions() {
-  // If we already know the size for this model, return it.
-  const known = {
+function getEmbeddingDimensions() {
+  const dimensions = {
     "text-embedding-3-large": 3072,
     "text-embedding-3-small": 1536,
     "text-embedding-ada-002": 1536,
     "openai/text-embedding-3-large": 3072,
     "openai/text-embedding-3-small": 1536,
     "openai/text-embedding-ada-002": 1536,
- };
-
-  if (known[settings.embeddingModel]) return known[settings.embeddingModel];
-
-  // Dynamic fallback — actually call one embedding to detect dimension
-  try {
-    const response = await fetch(`${getEmbeddingEndpoint()}`, {
-      method: "POST",
-      headers: getEmbeddingHeaders(),
-      body: JSON.stringify({
-        model: settings.embeddingModel,
-        input: "dimension check"
-      }),
-    });
-    const data = await response.json();
-    const vector = data.data?.[0]?.embedding;
-    if (Array.isArray(vector)) return vector.length;
-  } catch (err) {
-    console.warn("[Qdrant Memory] Could not auto-detect embedding dimension:", err);
   }
-
-  // Default fallback
-  return 1536;
+  return dimensions[settings.embeddingModel] || 1536
 }
 
 function getEmbeddingProviderError() {
