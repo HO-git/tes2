@@ -406,10 +406,11 @@ function pickFirstCSRFToken() {
 
 function getHeadersFromSillyTavernContext() {
   try {
-    const getRequestHeaders = window.SillyTavern?.getContext?.getRequestHeaders
+    const context = window.SillyTavern?.getContext?.()
+    const getRequestHeaders = context?.getRequestHeaders
 
     if (typeof getRequestHeaders === "function") {
-      const headers = getRequestHeaders()
+      const headers = getRequestHeaders.call(context)
 
       if (headers && typeof headers === "object") {
         return headers
