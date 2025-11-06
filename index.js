@@ -1384,6 +1384,19 @@ async function indexCharacterChats() {
 
   $("body").append(modalHtml)
 
+  const closeModal = () => {
+    $("#qdrant_index_modal").remove()
+    $("#qdrant_index_overlay").remove()
+  }
+
+  const setCancelButtonToClose = () => {
+    $("#qdrant_index_cancel")
+      .prop("disabled", false)
+      .text("Close")
+      .off("click")
+      .on("click", closeModal)
+  }
+
   let cancelled = false
   $("#qdrant_index_cancel").on("click", () => {
     cancelled = true
@@ -1396,9 +1409,9 @@ async function indexCharacterChats() {
 
     if (chatFiles.length === 0) {
       $("#qdrant_index_status").text("No chat files found")
+      setCancelButtonToClose()
       setTimeout(() => {
-        $("#qdrant_index_modal").remove()
-        $("#qdrant_index_overlay").remove()
+        closeModal()
       }, 2000)
       return
     }
@@ -1465,18 +1478,13 @@ async function indexCharacterChats() {
       toastr.success(`Indexed ${savedChunks} new chunks, skipped ${skippedChunks} existing`, "Qdrant Memory")
     }
 
-    $("#qdrant_index_cancel").text("Close")
-    $("#qdrant_index_cancel")
-      .off("click")
-      .on("click", () => {
-        $("#qdrant_index_modal").remove()
-        $("#qdrant_index_overlay").remove()
-      })
+    setCancelButtonToClose()
   } catch (error) {
     console.error("[Qdrant Memory] Error indexing chats:", error)
     $("#qdrant_index_status").text("Error during indexing")
     $("#qdrant_index_details").text(error.message)
     toastr.error("Failed to index chats", "Qdrant Memory")
+    setCancelButtonToClose()
   }
 }
 
