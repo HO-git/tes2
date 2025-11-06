@@ -888,6 +888,7 @@ function createChunkFromBuffer() {
 }
 
 async function saveChunkToQdrant(chunk, participants) {
+  if (!settings.enabled) return false
   if (!chunk || !participants || participants.length === 0) return false
 
   try {
@@ -973,6 +974,7 @@ async function saveChunkToQdrant(chunk, participants) {
 }
 
 async function processMessageBuffer() {
+  if (!settings.enabled) return
   if (messageBuffer.length === 0) return
 
   const chunk = createChunkFromBuffer()
@@ -995,6 +997,7 @@ async function processMessageBuffer() {
 }
 
 function bufferMessage(text, characterName, isUser, messageId) {
+  if (!settings.enabled) return
   if (!settings.autoSaveMemories) return
   if (getEmbeddingProviderError()) return
   if (text.length < settings.minMessageLength) return
@@ -1580,6 +1583,7 @@ globalThis.qdrantMemoryInterceptor = async (chat, contextSize, abort, type) => {
 // ============================================================================
 
 function onMessageSent() {
+  if (!settings.enabled) return
   if (!settings.autoSaveMemories) return
 
   try {
@@ -2200,21 +2204,31 @@ window.jQuery(async () => {
   // Hook into message events for automatic saving
   const eventSource = window.eventSource
   if (typeof eventSource !== "undefined" && eventSource.on) {
-    eventSource.on("MESSAGE_RECEIVED", onMessageSent)
-    eventSource.on("USER_MESSAGE_RENDERED", onMessageSent)
+    const handleMessageEvent = () => {
+      if (!settings.enabled || !settings.autoSaveMemories) return
+      onMessageSent()
+    }
+
+    eventSource.on("MESSAGE_RECEIVED", handleMessageEvent)
+    eventSource.on("USER_MESSAGE_RENDERED", handleMessageEvent)
     console.log("[Qdrant Memory] Using eventSource hooks")
   } else {
     // Fallback: poll for new messages
     console.log("[Qdrant Memory] Using polling fallback for auto-save")
     let lastChatLength = 0
     setInterval(() => {
-      if (!settings.autoSaveMemories) return
       const context = getContext()
       const chat = context.chat || []
-      if (chat.length > lastChatLength) {
+
+      if (!settings.enabled || !settings.autoSaveMemories) {
         lastChatLength = chat.length
+        return
+      }
+
+      if (chat.length > lastChatLength) {
         onMessageSent()
       }
+      lastChatLength = chat.length
     }, 2000)
   }
 
