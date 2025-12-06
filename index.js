@@ -2187,8 +2187,6 @@ function createSettingsUI() {
         </label>
         <small>Keeps track of when duplicate content was last seen</small>
     </div>
-`;
-  const settingsHtml = `
         <div class="qdrant-memory-settings">
             <div class="inline-drawer">
                 <div class="inline-drawer-toggle inline-drawer-header">
