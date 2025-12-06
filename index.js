@@ -28,6 +28,10 @@ const defaultSettings = {
   minMessageLength: 5,
   showMemoryNotifications: true,
   retainRecentMessages: 5,
+  qdrant_retain_on_delete: false,
+  qdrant_update_duplicate_timestamp: true,  // NEW
+  qdrant_dedupe_threshold: 0.95,            // NEW - configurable threshold
+  qdrant_min_message_length: 10,
   chunkMinSize: 1200,
   chunkMaxSize: 1500,
   chunkTimeout: 30000, // 30 seconds - save chunk if no new messages
@@ -1777,11 +1781,413 @@ async function processSaveQueue() {
   processingSaveQueue = false
 }
 
+async function createMemory(text, metadata = {}, dedupeThreshold = 0.95) {
+    if (!qdrantClient) {
+        console.error('[Qdrant] Client not initialized');
+        return null;
+    }
+
+    if (!text || typeof text !== 'string' || text.trim().length === 0) {
+        console.warn('[Qdrant] Cannot create memory: empty or invalid text');
+        return null;
+    }
+
+    const trimmedText = text.trim();
+
+    try {
+        const embedding = await getEmbedding(trimmedText);
+
+        if (!embedding || embedding.length === 0) {
+            console.error('[Qdrant] Failed to generate embedding for memory');
+            return null;
+        }
+
+        // === NEW: Deduplication check ===
+        const character = metadata.character || "unknown";
+
+        try {
+            const existingResults = await qdrantClient.search(currentSettings.qdrant_collection_name, {
+                vector: embedding,
+                limit: 1,
+                score_threshold: dedupeThreshold,
+                filter: {
+                    must: [
+                        { key: "character", match: { value: character } }
+                    ]
+                }
+            });
+
+            if (existingResults && existingResults.length > 0) {
+                console.log(`[Qdrant] Duplicate memory detected (score: ${existingResults[0].score.toFixed(4)}), skipping insertion`);
+                console.log(`[Qdrant] Existing memory: "${existingResults[0].payload?.text?.substring(0, 50)}..."`);
+
+                // Optionally update timestamp of existing memory to show it's still relevant
+                if (currentSettings.qdrant_update_duplicate_timestamp) {
+                    await qdrantClient.setPayload(currentSettings.qdrant_collection_name, {
+                        points: [existingResults[0].id],
+                        payload: {
+                            last_seen: Date.now()
+                        }
+                    });
+                }
+
+                return existingResults[0].id; // Return existing ID
+            }
+        } catch (searchError) {
+            console.warn('[Qdrant] Deduplication check failed, proceeding with insertion:', searchError);
+            // Continue with insertion if dedup check fails
+        }
+        // === END Deduplication check ===
+
+        const id = generateUUID();
+
+        const payload = {
+            text: trimmedText,
+            character: character,
+            timestamp: metadata.timestamp || Date.now(),
+            created_at: Date.now(),
+            last_seen: Date.now(),
+            type: metadata.type || "general",
+            message_id: metadata.message_id || null,  // Explicitly include message_id
+            chat_id: metadata.chat_id || null,
+            source: metadata.source || "conversation",
+            ...metadata  // Include any additional metadata
+        };
+
+        await qdrantClient.upsert(currentSettings.qdrant_collection_name, {
+            wait: true,
+            points: [{
+                id: id,
+                vector: embedding,
+                payload: payload,
+            }],
+        });
+
+        console.log(`[Qdrant] Memory created successfully with ID: ${id}`);
+        console.log(`[Qdrant] Memory text: "${trimmedText.substring(0, 50)}..."`);
+
+        return id;
+
+    } catch (error) {
+        console.error('[Qdrant] Error creating memory:', error);
+        return null;
+    }
+}
+
+// Use a Map instead of Set for better race condition handling
+const memoryProcessingQueue = new Map(); // messageId -> Promise
+
+async function processMessageForMemory(messageId, messageText, characterName, chatId = null) {
+    // Validate inputs
+    if (messageId === undefined || messageId === null) {
+        console.warn('[Qdrant] Cannot process message: invalid messageId');
+        return;
+    }
+
+    if (!messageText || typeof messageText !== 'string' || messageText.trim().length === 0) {
+        console.warn('[Qdrant] Cannot process message: empty or invalid messageText');
+        return;
+    }
+
+    if (!characterName || typeof characterName !== 'string') {
+        console.warn('[Qdrant] Cannot process message: invalid characterName');
+        return;
+    }
+
+    // === IMPROVED: Race condition prevention using Promise ===
+    const messageKey = `${characterName}_${messageId}`;
+
+    if (memoryProcessingQueue.has(messageKey)) {
+        console.log(`[Qdrant] Message ${messageId} is already being processed, waiting...`);
+        try {
+            await memoryProcessingQueue.get(messageKey);
+        } catch (e) {
+            // Previous processing failed, we can retry
+        }
+        return;
+    }
+
+    // Create a deferred promise
+    let resolveProcessing, rejectProcessing;
+    const processingPromise = new Promise((resolve, reject) => {
+        resolveProcessing = resolve;
+        rejectProcessing = reject;
+    });
+
+    memoryProcessingQueue.set(messageKey, processingPromise);
+
+    try {
+        console.log(`[Qdrant] Processing message ${messageId} for memory extraction`);
+
+        // Clean the message text
+        const cleanedText = cleanMessageText(messageText);
+
+        if (cleanedText.length < currentSettings.qdrant_min_message_length) {
+            console.log(`[Qdrant] Message too short (${cleanedText.length} chars), skipping`);
+            resolveProcessing();
+            return;
+        }
+
+        // Check if message should be processed based on settings
+        if (!shouldProcessMessage(cleanedText, characterName)) {
+            console.log(`[Qdrant] Message filtered out by processing rules`);
+            resolveProcessing();
+            return;
+        }
+
+        // Extract memories using LLM if enabled, otherwise use the message directly
+        let memoryTexts = [];
+
+        if (currentSettings.qdrant_use_llm_extraction) {
+            memoryTexts = await extractMemoriesWithLLM(cleanedText, characterName);
+        } else {
+            memoryTexts = [cleanedText];
+        }
+
+        if (!memoryTexts || memoryTexts.length === 0) {
+            console.log(`[Qdrant] No memories extracted from message ${messageId}`);
+            resolveProcessing();
+            return;
+        }
+
+        // Get current chat ID if not provided
+        const currentChatId = chatId || getCurrentChatId();
+
+        // Create memories for each extracted text
+        let createdCount = 0;
+        for (const text of memoryTexts) {
+            if (text && text.trim().length > 0) {
+                const memoryId = await createMemory(text, {
+                    character: characterName,
+                    type: 'conversation',
+                    timestamp: Date.now(),
+                    message_id: messageId,        // === FIX: Now properly passing message_id ===
+                    chat_id: currentChatId,       // === NEW: Also pass chat_id for better tracking ===
+                    source: 'auto_extraction'
+                });
+
+                if (memoryId) {
+                    createdCount++;
+                }
+            }
+        }
+
+        console.log(`[Qdrant] Created ${createdCount} memories from message ${messageId}`);
+        resolveProcessing();
+
+    } catch (error) {
+        console.error(`[Qdrant] Error processing message ${messageId}:`, error);
+        rejectProcessing(error);
+    } finally {
+        // Clean up the queue after a short delay to handle rapid duplicate calls
+        setTimeout(() => {
+            memoryProcessingQueue.delete(messageKey);
+        }, 1000);
+    }
+}
+
+// Helper function to get current chat ID
+function getCurrentChatId() {
+    try {
+        const context = getContext();
+        return context?.chatId || context?.chat?.id || null;
+    } catch (e) {
+        return null;
+    }
+}
+
+async function handleMessageDeleted(data) {
+    // Handle different event data formats from SillyTavern
+    let messageId;
+
+    if (typeof data === 'object') {
+        messageId = data.messageId ?? data.message_id ?? data.id ?? data;
+    } else {
+        messageId = data;
+    }
+
+    console.log(`[Qdrant] Message deleted event received for message: ${messageId}`);
+
+    // Check if retain on delete is enabled
+    if (currentSettings.qdrant_retain_on_delete) {
+        console.log(`[Qdrant] Retain on delete is enabled, skipping memory deletion for message ${messageId}`);
+
+        // Optionally mark the memory as "orphaned" but keep it
+        try {
+            await markMemoryAsOrphaned(messageId);
+        } catch (e) {
+            console.warn('[Qdrant] Could not mark memory as orphaned:', e);
+        }
+
+        return;
+    }
+
+    if (!qdrantClient) {
+        console.error('[Qdrant] Client not initialized, cannot delete memories');
+        return;
+    }
+
+    if (messageId === undefined || messageId === null) {
+        console.warn('[Qdrant] Cannot delete memories: invalid messageId');
+        return;
+    }
+
+    try {
+        // === FIX: Use scroll/filter instead of vector search for deletion ===
+        // This is more reliable since we're matching by message_id, not by content
+
+        const scrollResult = await qdrantClient.scroll(currentSettings.qdrant_collection_name, {
+            filter: {
+                must: [
+                    { key: "message_id", match: { value: messageId } }
+                ]
+            },
+            limit: 100,  // Should be enough for memories from a single message
+            with_payload: true,
+            with_vector: false
+        });
+
+        if (!scrollResult || !scrollResult.points || scrollResult.points.length === 0) {
+            console.log(`[Qdrant] No memories found for message ${messageId}`);
+            return;
+        }
+
+        const pointIds = scrollResult.points.map(point => point.id);
+
+        console.log(`[Qdrant] Found ${pointIds.length} memories to delete for message ${messageId}`);
+
+        // Delete the memories
+        await qdrantClient.delete(currentSettings.qdrant_collection_name, {
+            wait: true,
+            points: pointIds
+        });
+
+        console.log(`[Qdrant] Successfully deleted ${pointIds.length} memories for message ${messageId}`);
+
+    } catch (error) {
+        console.error(`[Qdrant] Error deleting memories for message ${messageId}:`, error);
+    }
+}
+
+// Helper function to mark memories as orphaned (optional - for retain feature)
+async function markMemoryAsOrphaned(messageId) {
+    if (!qdrantClient || messageId === undefined || messageId === null) {
+        return;
+    }
+
+    try {
+        const scrollResult = await qdrantClient.scroll(currentSettings.qdrant_collection_name, {
+            filter: {
+                must: [
+                    { key: "message_id", match: { value: messageId } }
+                ]
+            },
+            limit: 100,
+            with_payload: false,
+            with_vector: false
+        });
+
+        if (scrollResult && scrollResult.points && scrollResult.points.length > 0) {
+            const pointIds = scrollResult.points.map(point => point.id);
+
+            await qdrantClient.setPayload(currentSettings.qdrant_collection_name, {
+                points: pointIds,
+                payload: {
+                    orphaned: true,
+                    orphaned_at: Date.now(),
+                    original_message_id: messageId
+                }
+            });
+
+            console.log(`[Qdrant] Marked ${pointIds.length} memories as orphaned for message ${messageId}`);
+        }
+    } catch (error) {
+        console.warn('[Qdrant] Error marking memories as orphaned:', error);
+    }
+}
+
+async function migrateExistingMemories() {
+    if (!qdrantClient) {
+        console.error('[Qdrant] Client not initialized');
+        return;
+    }
+
+    console.log('[Qdrant] Starting memory migration...');
+
+    try {
+        let offset = null;
+        let totalUpdated = 0;
+
+        do {
+            const scrollResult = await qdrantClient.scroll(currentSettings.qdrant_collection_name, {
+                filter: {
+                    must_not: [
+                        { key: "message_id", match: { any: [] } }  // Has no message_id
+                    ]
+                },
+                limit: 100,
+                offset: offset,
+                with_payload: true,
+                with_vector: false
+            });
+
+            if (!scrollResult || !scrollResult.points || scrollResult.points.length === 0) {
+                break;
+            }
+
+            // Update points to have explicit null message_id and mark as legacy
+            const pointIds = scrollResult.points.map(p => p.id);
+
+            await qdrantClient.setPayload(currentSettings.qdrant_collection_name, {
+                points: pointIds,
+                payload: {
+                    message_id: null,
+                    legacy_memory: true,
+                    migrated_at: Date.now()
+                }
+            });
+
+            totalUpdated += pointIds.length;
+            offset = scrollResult.next_page_offset;
+
+            console.log(`[Qdrant] Migrated ${totalUpdated} memories so far...`);
+
+        } while (offset);
+
+        console.log(`[Qdrant] Migration complete. Updated ${totalUpdated} memories.`);
+
+    } catch (error) {
+        console.error('[Qdrant] Migration error:', error);
+    }
+}
+
+
 // ============================================================================
 // SETTINGS UI
 // ============================================================================
 
 function createSettingsUI() {
+  const newSettingsHTML = `
+    <div class="qdrant-setting">
+        <label for="qdrant_dedupe_threshold">
+            <span>Deduplication Threshold</span>
+            <input type="range" id="qdrant_dedupe_threshold"
+                   min="0.8" max="1.0" step="0.01"
+                   value="${currentSettings.qdrant_dedupe_threshold}">
+            <span id="qdrant_dedupe_threshold_value">${currentSettings.qdrant_dedupe_threshold}</span>
+        </label>
+        <small>Higher = stricter matching (0.95 recommended)</small>
+    </div>
+
+    <div class="qdrant-setting">
+        <label for="qdrant_update_duplicate_timestamp">
+            <input type="checkbox" id="qdrant_update_duplicate_timestamp"
+                   ${currentSettings.qdrant_update_duplicate_timestamp ? 'checked' : ''}>
+            <span>Update timestamp on duplicate detection</span>
+        </label>
+        <small>Keeps track of when duplicate content was last seen</small>
+    </div>
+`;
   const settingsHtml = `
         <div class="qdrant-memory-settings">
             <div class="inline-drawer">
