@@ -28,6 +28,10 @@ const defaultSettings = {
   minMessageLength: 5,
   showMemoryNotifications: true,
   retainRecentMessages: 5,
+  qdrant_retain_on_delete: false,
+  qdrant_update_duplicate_timestamp: true,  // NEW
+  qdrant_dedupe_threshold: 0.95,            // NEW - configurable threshold
+  qdrant_min_message_length: 10,
   chunkMinSize: 1200,
   chunkMaxSize: 1500,
   chunkTimeout: 30000, // 30 seconds - save chunk if no new messages
