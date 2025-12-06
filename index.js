@@ -1,6 +1,6 @@
 // Qdrant Memory Extension for SillyTavern
 // This extension retrieves relevant memories from Qdrant and injects them into conversations
-// Version 3.1.1 - Fixed date/timestamp handling across all sources
+// Version 3.1.2 - Fixed duplicate insertions and retain feature
 
 const extensionName = "qdrant-memory"
 
@@ -31,6 +31,9 @@ const defaultSettings = {
   chunkMinSize: 1200,
   chunkMaxSize: 1500,
   chunkTimeout: 30000, // 30 seconds - save chunk if no new messages
+  // NEW v3.1.2 settings
+  dedupeThreshold: 0.92, // Similarity threshold for chunk deduplication
+  preventDuplicateInjection: true, // Prevent inserting memories multiple times
 }
 
 let settings = { ...defaultSettings }
@@ -40,6 +43,9 @@ let processingSaveQueue = false
 let messageBuffer = []
 let lastMessageTime = 0
 let chunkTimer = null
+
+// NEW: Track which chats have had memories injected to prevent duplicates
+const memoryInjectionTracker = new WeakMap()
 
 const EMBEDDING_MODEL_OPTIONS = {
   openai: [
@@ -107,14 +113,6 @@ const OPENAI_MODEL_ALIASES = {
 
 /**
  * Normalizes various date formats to Unix timestamp in milliseconds
- * Handles:
- * - Millisecond timestamps (e.g., 1730000000000)
- * - Second timestamps (e.g., 1730000000)
- * - Date objects
- * - Date strings (e.g., "October 20, 2025 12:16pm")
- * 
- * @param {number|string|Date} date - The date to normalize
- * @returns {number} Unix timestamp in milliseconds
  */
 function normalizeTimestamp(date) {
   // Already a valid millisecond timestamp
@@ -153,8 +151,6 @@ function normalizeTimestamp(date) {
 
 /**
  * Formats a timestamp as YYYY-MM-DD for display in memory chunks
- * @param {number} timestamp - Unix timestamp in milliseconds
- * @returns {string} Formatted date string
  */
 function formatDateForChunk(timestamp) {
   try {
@@ -425,7 +421,6 @@ function getHeadersFromSillyTavernContext() {
 
 // Get headers for SillyTavern API requests (with CSRF token if available)
 function getSillyTavernHeaders() {
-  // Debug: Check what's available
   if (settings.debugMode) {
     console.log("[Qdrant Memory] === Checking available ST methods ===")
     console.log("[Qdrant Memory] window.SillyTavern exists?", typeof SillyTavern !== "undefined")
@@ -696,6 +691,45 @@ async function generateEmbedding(text) {
 // MEMORY SEARCH AND RETRIEVAL
 // ============================================================================
 
+// NEW: Check if chunk already exists (deduplication)
+async function chunkExistsInCollection(collectionName, embedding, text, dedupeThreshold) {
+  try {
+    const searchPayload = {
+      vector: embedding,
+      limit: 1,
+      score_threshold: dedupeThreshold,
+      with_payload: true,
+    }
+
+    const response = await fetch(`${settings.qdrantUrl}/collections/${collectionName}/points/search`, {
+      method: "POST",
+      headers: getQdrantHeaders(),
+      body: JSON.stringify(searchPayload),
+    })
+
+    if (!response.ok) {
+      return false
+    }
+
+    const data = await response.json()
+    const results = data.result || []
+
+    if (results.length > 0) {
+      if (settings.debugMode) {
+        console.log(`[Qdrant Memory] Found similar chunk with score: ${results[0].score.toFixed(4)}`)
+        console.log(`[Qdrant Memory] Existing: "${results[0].payload?.text?.substring(0, 80)}..."`)
+        console.log(`[Qdrant Memory] New: "${text.substring(0, 80)}..."`)
+      }
+      return true
+    }
+
+    return false
+  } catch (error) {
+    console.warn('[Qdrant Memory] Deduplication check failed:', error)
+    return false
+  }
+}
+
 // Search Qdrant for relevant memories
 async function searchMemories(query, characterName) {
   if (!settings.enabled) return []
@@ -714,42 +748,42 @@ async function searchMemories(query, characterName) {
       return []
     }
 
-    // Get the timestamp from N messages ago to exclude recent context
+    // FIXED: Improved retain logic - get ALL message IDs that should be excluded
     const context = getContext()
     const chat = context.chat || []
-    let timestampThreshold = 0
+    const excludedMessageIds = new Set()
 
     if (settings.retainRecentMessages > 0 && chat.length > settings.retainRecentMessages) {
-      // Get the timestamp of the message at the retain boundary
-      const retainIndex = chat.length - settings.retainRecentMessages
-      const retainMessage = chat[retainIndex]
-      if (retainMessage && retainMessage.send_date) {
-        // FIXED: Normalize the timestamp before using it
-        timestampThreshold = normalizeTimestamp(retainMessage.send_date)
-        if (settings.debugMode) {
-          console.log(`[Qdrant Memory] Excluding messages newer than timestamp: ${timestampThreshold} (${formatDateForChunk(timestampThreshold)})`)
+      // Get the last N messages
+      const recentMessages = chat.slice(-settings.retainRecentMessages)
+      
+      recentMessages.forEach(msg => {
+        // Create all possible message ID formats this message might have been saved as
+        const normalizedDate = normalizeTimestamp(msg.send_date || Date.now())
+        const msgIndex = chat.indexOf(msg)
+        
+        // Add multiple ID formats to catch all variations
+        excludedMessageIds.add(`${characterName}_${normalizedDate}_${msgIndex}`)
+        excludedMessageIds.add(`${characterName}_${msg.send_date}_${msgIndex}`)
+        
+        if (settings.debugMode && excludedMessageIds.size <= 5) {
+          console.log(`[Qdrant Memory] Excluding message ID: ${characterName}_${normalizedDate}_${msgIndex}`)
         }
+      })
+
+      if (settings.debugMode) {
+        console.log(`[Qdrant Memory] Excluding ${excludedMessageIds.size} recent message IDs from search`)
       }
     }
 
     const searchPayload = {
       vector: embedding,
-      limit: settings.memoryLimit,
+      limit: settings.memoryLimit * 3, // Get more results for filtering
       score_threshold: settings.scoreThreshold,
       with_payload: true,
     }
 
     const filterConditions = []
-
-    // Add timestamp filter to exclude recent messages
-    if (timestampThreshold > 0) {
-      filterConditions.push({
-        key: "timestamp",
-        range: {
-          lt: timestampThreshold,
-        },
-      })
-    }
 
     // Add character filter if using shared collection
     if (!settings.usePerCharacterCollections) {
@@ -778,12 +812,39 @@ async function searchMemories(query, characterName) {
     }
 
     const data = await response.json()
+    let results = data.result || []
 
-    if (settings.debugMode) {
-      console.log("[Qdrant Memory] Found memories:", data.result)
+    // FIXED: Filter out chunks that contain any excluded message IDs
+    if (excludedMessageIds.size > 0) {
+      const beforeFilterCount = results.length
+      
+      results = results.filter(memory => {
+        const messageIds = memory.payload.messageIds || ""
+        const chunkMessageIds = messageIds.split(",")
+        
+        // Check if any of the chunk's message IDs are in the excluded set
+        const hasExcludedMessage = chunkMessageIds.some(id => excludedMessageIds.has(id.trim()))
+        
+        if (hasExcludedMessage && settings.debugMode) {
+          console.log(`[Qdrant Memory] Filtered out chunk containing recent message: ${messageIds}`)
+        }
+        
+        return !hasExcludedMessage
+      })
+
+      if (settings.debugMode) {
+        console.log(`[Qdrant Memory] Filtered ${beforeFilterCount - results.length} chunks with recent messages`)
+      }
     }
 
-    return data.result || []
+    // Limit to the requested number of memories
+    results = results.slice(0, settings.memoryLimit)
+
+    if (settings.debugMode) {
+      console.log(`[Qdrant Memory] Found ${results.length} valid memories (after retain filter)`)
+    }
+
+    return results
   } catch (error) {
     console.error("[Qdrant Memory] Error searching memories:", error)
     return []
@@ -791,8 +852,6 @@ async function searchMemories(query, characterName) {
 }
 
 // Format memories for display
-const MAX_MEMORY_LENGTH = 1500 // adjust per your preference
-
 function formatMemories(memories) {
   if (!memories || memories.length === 0) return ""
 
@@ -892,21 +951,57 @@ async function saveChunkToQdrant(chunk, participants) {
   if (!chunk || !participants || participants.length === 0) return false
 
   try {
-    // Generate embedding for the chunk text (already has date prefix from creation)
+    // Generate embedding for the chunk text
     const embedding = await generateEmbedding(chunk.text)
     if (!embedding) {
       console.error("[Qdrant Memory] Cannot save chunk - embedding generation failed")
       return false
     }
 
+    // NEW: Check for duplicates before saving
+    let alreadyExists = false
+    
+    for (const characterName of participants) {
+      const collectionName = getCollectionName(characterName)
+      const collectionReady = await ensureCollection(characterName, embedding.length)
+      
+      if (!collectionReady) {
+        console.error(`[Qdrant Memory] Cannot check duplicates - collection creation failed for ${characterName}`)
+        continue
+      }
+
+      const exists = await chunkExistsInCollection(
+        collectionName, 
+        embedding, 
+        chunk.text, 
+        settings.dedupeThreshold
+      )
+      
+      if (exists) {
+        alreadyExists = true
+        if (settings.debugMode) {
+          console.log(`[Qdrant Memory] Duplicate chunk detected in ${characterName}'s collection, skipping save`)
+        }
+        break
+      }
+    }
+
+    if (alreadyExists) {
+      if (settings.showMemoryNotifications) {
+        const toastr = window.toastr
+        toastr.info("Similar conversation already saved", "Qdrant Memory", { timeOut: 1500 })
+      }
+      return false
+    }
+
     const pointId = generateUUID()
 
-    // Prepare payload - chunk.text already includes date prefix
+    // Prepare payload
     const payload = {
-      text: chunk.text, // Already has date prefix from createChunkFrom* functions
+      text: chunk.text,
       speakers: chunk.speakers.join(", "),
       messageCount: chunk.messageCount,
-      timestamp: chunk.timestamp, // Keep original timestamp for filtering
+      timestamp: chunk.timestamp,
       messageIds: chunk.messageIds.join(","),
       isChunk: true,
     }
@@ -943,7 +1038,6 @@ async function saveChunkToQdrant(chunk, participants) {
       })
 
       if (!response.ok) {
-        const errorText = await response.text().catch(() => "Unable to read error response")
         console.error(
           `[Qdrant Memory] Failed to save chunk to ${characterName}: ${response.status} ${response.statusText}`,
         )
@@ -1252,7 +1346,7 @@ function createChunksFromChat(messages, characterName) {
     if (isUser && !settings.saveUserMessages) continue
     if (!isUser && !settings.saveCharacterMessages) continue
 
-    // FIXED: Normalize send_date before using it
+    // Normalize send_date before using it
     const normalizedDate = normalizeTimestamp(msg.send_date || Date.now())
     
     if (settings.debugMode) {
@@ -1265,7 +1359,7 @@ function createChunksFromChat(messages, characterName) {
       characterName: characterName,
       isUser: isUser,
       messageId: `${characterName}_${normalizedDate}_${messages.indexOf(msg)}`,
-      timestamp: normalizedDate, // Use normalized timestamp
+      timestamp: normalizedDate,
     }
 
     const messageSize = text.length + characterName.length + 4
@@ -1310,7 +1404,6 @@ function createChunkFromMessages(messages) {
     const line = `${speaker}: ${msg.text}\n`
     chunkText += line
 
-    // FIXED: All timestamps are already normalized in createChunksFromChat
     if (msg.timestamp < oldestTimestamp) {
       oldestTimestamp = msg.timestamp
     }
@@ -1458,7 +1551,7 @@ async function indexCharacterChats() {
         }
 
         // Get participants (for group chats)
-        const participants = [characterName] // For now, just save to current character
+        const participants = [characterName]
 
         // Save chunk
         const success = await saveChunkToQdrant(chunk, participants)
@@ -1495,10 +1588,19 @@ async function indexCharacterChats() {
 // GENERATION INTERCEPTOR
 // ============================================================================
 
+// FIXED: Prevent duplicate memory injection
 globalThis.qdrantMemoryInterceptor = async (chat, contextSize, abort, type) => {
   if (!settings.enabled) {
     if (settings.debugMode) {
       console.log("[Qdrant Memory] Extension disabled, skipping")
+    }
+    return
+  }
+
+  // NEW: Check if memories were already injected for this chat array
+  if (settings.preventDuplicateInjection && memoryInjectionTracker.has(chat)) {
+    if (settings.debugMode) {
+      console.log("[Qdrant Memory] Memories already injected for this chat, skipping")
     }
     return
   }
@@ -1560,6 +1662,11 @@ globalThis.qdrantMemoryInterceptor = async (chat, contextSize, abort, type) => {
       const insertIndex = Math.max(0, chat.length - settings.memoryPosition)
       chat.splice(insertIndex, 0, memoryEntry)
 
+      // NEW: Mark this chat array as having had memories injected
+      if (settings.preventDuplicateInjection) {
+        memoryInjectionTracker.set(chat, true)
+      }
+
       if (settings.debugMode) {
         console.log(`[Qdrant Memory] Injected ${memories.length} memories at position ${insertIndex}`)
       }
@@ -1596,7 +1703,7 @@ function onMessageSent() {
     // Get the last message
     const lastMessage = chat[chat.length - 1]
 
-    // FIXED: Normalize send_date for messageId
+    // Normalize send_date for messageId
     const normalizedDate = normalizeTimestamp(lastMessage.send_date || Date.now())
     
     // Create a unique ID for this message
@@ -1665,7 +1772,6 @@ async function showMemoryViewer() {
 
   const count = info.points_count || 0
 
-  // Create a simple modal using jQuery
   const modalHtml = `
         <div id="qdrant_modal" style="
             position: fixed;
@@ -1708,13 +1814,11 @@ async function showMemoryViewer() {
   const $ = window.$
   $("body").append(modalHtml)
 
-  // Close modal
   $("#qdrant_close_modal, #qdrant_overlay").on("click", () => {
     $("#qdrant_modal").remove()
     $("#qdrant_overlay").remove()
   })
 
-  // Delete collection
   $("#qdrant_delete_collection_btn").on("click", async function () {
     const confirmed = confirm(
       `Are you sure you want to delete ALL memories for ${characterName}? This cannot be undone!`,
@@ -1740,7 +1844,6 @@ async function showMemoryViewer() {
 // UTILITY FUNCTIONS
 // ============================================================================
 
-// Get current context
 function getContext() {
   const SillyTavern = window.SillyTavern
   
@@ -1754,7 +1857,6 @@ function getContext() {
   }
 }
 
-// Generate a unique UUID
 function generateUUID() {
   return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
     var r = (Math.random() * 16) | 0,
@@ -1763,17 +1865,12 @@ function generateUUID() {
   })
 }
 
-// Process save queue (legacy - currently unused)
 async function processSaveQueue() {
   if (processingSaveQueue || saveQueue.length === 0) return
-
   processingSaveQueue = true
-
   while (saveQueue.length > 0) {
-    const item = saveQueue.shift()
-    // saveMessageToQdrant function removed - now using chunking system
+    saveQueue.shift()
   }
-
   processingSaveQueue = false
 }
 
@@ -1791,7 +1888,7 @@ function createSettingsUI() {
                 </div>
                 <div class="inline-drawer-content">
                     <p style="margin: 10px 0; color: #666; font-size: 0.9em;">
-                        Automatic memory creation with temporal context
+                        Automatic memory creation with temporal context (v3.1.2)
                     </p>
                     
                     <div style="margin: 15px 0;">
@@ -1950,10 +2047,25 @@ function createSettingsUI() {
                        style="width: 100%; margin-top: 5px;" />
                 <small style="color: #666;">Minimum characters to save a message</small>
             </div>
+
+            <div style="margin: 10px 0;">
+                <label><strong>Deduplication Threshold:</strong> <span id="dedupe_threshold_display">${settings.dedupeThreshold}</span></label>
+                <input type="range" id="qdrant_dedupe_threshold" min="0.80" max="1.00" step="0.01" value="${settings.dedupeThreshold}" 
+                       style="width: 100%; margin-top: 5px;" />
+                <small style="color: #666;">Prevent saving duplicate chunks (higher = stricter)</small>
+            </div>
             
             <hr style="margin: 15px 0;" />
             
             <h4>Other Settings</h4>
+            
+            <div style="margin: 15px 0;">
+                <label style="display: flex; align-items: center; gap: 10px;">
+                    <input type="checkbox" id="qdrant_prevent_duplicate" ${settings.preventDuplicateInjection ? "checked" : ""} />
+                    Prevent duplicate memory injection
+                </label>
+                <small style="color: #666; display: block; margin-left: 30px;">Prevent memories from being added to context multiple times</small>
+            </div>
             
             <div style="margin: 15px 0;">
                 <label style="display: flex; align-items: center; gap: 10px;">
@@ -1987,7 +2099,6 @@ function createSettingsUI() {
   const $ = window.$
   $("#extensions_settings2").append(settingsHtml)
 
-  // Ensure the inline drawer uses SillyTavern's default behaviour
   if (typeof window.applyInlineDrawerListeners === "function") {
     window.applyInlineDrawerListeners()
   }
@@ -2138,6 +2249,15 @@ function createSettingsUI() {
     $("#min_message_length_display").text(settings.minMessageLength)
   })
 
+  $("#qdrant_dedupe_threshold").on("input", function () {
+    settings.dedupeThreshold = Number.parseFloat($(this).val())
+    $("#dedupe_threshold_display").text(settings.dedupeThreshold.toFixed(2))
+  })
+
+  $("#qdrant_prevent_duplicate").on("change", function () {
+    settings.preventDuplicateInjection = $(this).is(":checked")
+  })
+
   $("#qdrant_notifications").on("change", function () {
     settings.showMemoryNotifications = $(this).is(":checked")
   })
@@ -2232,5 +2352,5 @@ window.jQuery(async () => {
     }, 2000)
   }
 
-  console.log("[Qdrant Memory] Extension loaded successfully (v3.1.1 - temporal context with dates)")
+  console.log("[Qdrant Memory] Extension loaded successfully (v3.1.2 - fixed duplicate injection and retain)")
 })
