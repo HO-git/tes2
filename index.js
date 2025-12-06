@@ -778,7 +778,7 @@ async function searchMemories(query, characterName) {
 
     const searchPayload = {
       vector: embedding,
-      limit: settings.memoryLimit * 3, // Get more results for filtering
+      limit: settings.memoryLimit * 2, // Get more results for filtering
       score_threshold: settings.scoreThreshold,
       with_payload: true,
     }
@@ -1888,7 +1888,7 @@ function createSettingsUI() {
                 </div>
                 <div class="inline-drawer-content">
                     <p style="margin: 10px 0; color: #666; font-size: 0.9em;">
-                        Automatic memory creation with temporal context (v3.1.2)
+                        Automatic memory creation with temporal context
                     </p>
                     
                     <div style="margin: 15px 0;">
