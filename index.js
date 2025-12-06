@@ -1786,27 +1786,6 @@ async function processSaveQueue() {
 // ============================================================================
 
 function createSettingsUI() {
-  const newSettingsHTML = `
-    <div class="qdrant-setting">
-        <label for="qdrant_dedupe_threshold">
-            <span>Deduplication Threshold</span>
-            <input type="range" id="qdrant_dedupe_threshold"
-                   min="0.8" max="1.0" step="0.01"
-                   value="${currentSettings.qdrant_dedupe_threshold}">
-            <span id="qdrant_dedupe_threshold_value">${currentSettings.qdrant_dedupe_threshold}</span>
-        </label>
-        <small>Higher = stricter matching (0.95 recommended)</small>
-    </div>
-
-    <div class="qdrant-setting">
-        <label for="qdrant_update_duplicate_timestamp">
-            <input type="checkbox" id="qdrant_update_duplicate_timestamp"
-                   ${currentSettings.qdrant_update_duplicate_timestamp ? 'checked' : ''}>
-            <span>Update timestamp on duplicate detection</span>
-        </label>
-        <small>Keeps track of when duplicate content was last seen</small>
-    </div>
-`;
   const settingsHtml = `
         <div class="qdrant-memory-settings">
             <div class="inline-drawer">
@@ -1940,6 +1919,24 @@ function createSettingsUI() {
             <h4>Automatic Memory Creation</h4>
             
             <div style="margin: 10px 0;">
+                    <label for="qdrant_dedupe_threshold">
+            <span>Deduplication Threshold</span>
+            <input type="range" id="qdrant_dedupe_threshold"
+                   min="0.8" max="1.0" step="0.01"
+                   value="${currentSettings.qdrant_dedupe_threshold}">
+            <span id="qdrant_dedupe_threshold_value">${currentSettings.qdrant_dedupe_threshold}</span>
+        </label>
+        <small>Higher = stricter matching (0.95 recommended)</small>
+    </div>
+
+    <div class="qdrant-setting">
+        <label for="qdrant_update_duplicate_timestamp">
+            <input type="checkbox" id="qdrant_update_duplicate_timestamp"
+                   ${currentSettings.qdrant_update_duplicate_timestamp ? 'checked' : ''}>
+            <span>Update timestamp on duplicate detection</span>
+        </label>
+        <small>Keeps track of when duplicate content was last seen</small>
+    </div>
                 <label style="display: flex; align-items: center; gap: 10px;">
                     <input type="checkbox" id="qdrant_per_character" ${settings.usePerCharacterCollections ? "checked" : ""} />
                     <strong>Use Per-Character Collections</strong>
