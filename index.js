@@ -1710,6 +1710,9 @@ globalThis.qdrantMemoryInterceptor = async (chat, contextSize, abort, type) => {
 // ============================================================================
 
 
+// Global variable for tracking streaming state
+let pendingAssistantFinalize = null
+
 function clearPendingAssistantFinalize() {
   if (pendingAssistantFinalize?.pollTimerId) {
     clearInterval(pendingAssistantFinalize.pollTimerId)
@@ -1721,9 +1724,23 @@ function scheduleFinalizeLastAssistantMessage(messageId, characterName) {
   const context = getContext()
   const chat = context.chat || []
 
-  if (chat.length === 0) return
+  if (chat.length === 0) {
+    if (settings.debugMode) {
+      console.log("[Qdrant Memory] No chat messages to finalize")
+    }
+    return
+  }
 
   const lastMessage = chat[chat.length - 1]
+  
+  // Safety check: make sure this is actually a character message
+  if (lastMessage.is_user) {
+    if (settings.debugMode) {
+      console.log("[Qdrant Memory] Last message is user message, skipping finalize")
+    }
+    return
+  }
+  
   const initialText = lastMessage?.mes || ""
 
   clearPendingAssistantFinalize()
@@ -1731,6 +1748,11 @@ function scheduleFinalizeLastAssistantMessage(messageId, characterName) {
   const pollInterval = settings.streamFinalizePollMs || 250
   const stableMs = settings.streamFinalizeStableMs || 1200
   const maxWaitMs = settings.streamFinalizeMaxWaitMs || 300000
+
+  if (settings.debugMode) {
+    console.log("[Qdrant Memory] Starting stream finalize poll for character message")
+    console.log("[Qdrant Memory] Initial text length:", initialText.length)
+  }
 
   pendingAssistantFinalize = {
     messageId,
@@ -1742,27 +1764,64 @@ function scheduleFinalizeLastAssistantMessage(messageId, characterName) {
   }
 
   const finalizeAssistant = (text, reason) => {
-    bufferMessage(text, characterName, false, messageId)
-
-    if (settings.flushAfterAssistant && messageBuffer.length >= 2) {
-      processMessageBuffer()
+    if (!text || text.trim().length === 0) {
+      if (settings.debugMode) {
+        console.warn("[Qdrant Memory] Attempted to finalize empty message, skipping")
+      }
+      clearPendingAssistantFinalize()
+      return
     }
 
-    if (settings.debugMode && reason) {
-      console.log(`[Qdrant Memory] Finalized assistant message (${reason})`)
+    if (settings.debugMode) {
+      console.log(`[Qdrant Memory] Finalizing character message (${reason})`)
+      console.log(`[Qdrant Memory] Final text length: ${text.length}`)
+      console.log(`[Qdrant Memory] Text preview: "${text.substring(0, 100)}..."`)
+    }
+
+    // Buffer the complete message
+    bufferMessage(text, characterName, false, messageId)
+
+    // Optionally flush the buffer if we have enough messages
+    if (settings.flushAfterAssistant && messageBuffer.length >= 2) {
+      if (settings.debugMode) {
+        console.log("[Qdrant Memory] Flushing buffer after assistant message")
+      }
+      processMessageBuffer()
     }
 
     clearPendingAssistantFinalize()
   }
 
+  let pollCount = 0
+  
   pendingAssistantFinalize.pollTimerId = setInterval(() => {
+    pollCount++
+    
     const currentContext = getContext()
     const currentChat = currentContext.chat || []
+    
+    if (currentChat.length === 0) {
+      if (settings.debugMode) {
+        console.log("[Qdrant Memory] Chat is empty, cancelling finalize")
+      }
+      clearPendingAssistantFinalize()
+      return
+    }
+    
     const currentLastMessage = currentChat[currentChat.length - 1] || {}
-    const currentText = currentLastMessage.mes || pendingAssistantFinalize.lastText || ""
+    const currentText = currentLastMessage.mes || ""
     const now = Date.now()
 
+    // Log every 4 seconds (16 polls at 250ms) in debug mode
+    if (settings.debugMode && pollCount % 16 === 0) {
+      console.log(`[Qdrant Memory] Stream poll check #${pollCount}: length=${currentText.length}`)
+    }
+
+    // Detect if the text has changed
     if (currentText !== pendingAssistantFinalize.lastText) {
+      if (settings.debugMode && pollCount % 4 === 0) {
+        console.log(`[Qdrant Memory] Text changed: ${pendingAssistantFinalize.lastText.length} → ${currentText.length}`)
+      }
       pendingAssistantFinalize.lastText = currentText
       pendingAssistantFinalize.lastChangeAt = now
     }
@@ -1770,19 +1829,25 @@ function scheduleFinalizeLastAssistantMessage(messageId, characterName) {
     const stableDuration = now - pendingAssistantFinalize.lastChangeAt
     const totalDuration = now - pendingAssistantFinalize.startedAt
 
+    // Check if message switched to user (conversation continued)
     if (currentLastMessage.is_user) {
-      finalizeAssistant(pendingAssistantFinalize.lastText, "swapped to user message")
+      if (settings.debugMode) {
+        console.log("[Qdrant Memory] Detected new user message, finalizing previous assistant message")
+      }
+      finalizeAssistant(pendingAssistantFinalize.lastText, "new user message detected")
       return
     }
 
+    // Check if text has been stable for the required duration
     if (stableDuration >= stableMs) {
-      finalizeAssistant(pendingAssistantFinalize.lastText, "stable")
+      finalizeAssistant(pendingAssistantFinalize.lastText, `stable for ${stableDuration}ms`)
       return
     }
 
+    // Safety: max wait time exceeded
     if (totalDuration >= maxWaitMs) {
       if (settings.debugMode) {
-        console.warn("[Qdrant Memory] Max wait reached while finalizing assistant message")
+        console.warn(`[Qdrant Memory] Max wait (${maxWaitMs}ms) reached while finalizing assistant message`)
       }
       finalizeAssistant(pendingAssistantFinalize.lastText, "max wait reached")
     }
@@ -1798,7 +1863,12 @@ function onMessageSent() {
     const chat = context.chat || []
     const characterName = context.name2
 
-    if (!characterName || chat.length === 0) return
+    if (!characterName || chat.length === 0) {
+      if (settings.debugMode) {
+        console.log("[Qdrant Memory] No character or empty chat, skipping save")
+      }
+      return
+    }
 
     // Get the last message
     const lastMessage = chat[chat.length - 1]
@@ -1807,15 +1877,33 @@ function onMessageSent() {
     const normalizedDate = normalizeTimestamp(lastMessage.send_date || Date.now())
     
     // Create a unique ID for this message
-    const messageId = `${characterName}_${normalizedDate}_${chat.length}`
+    const messageId = `${characterName}_${normalizedDate}_${chat.length - 1}`
 
-    if (lastMessage.mes && lastMessage.mes.trim().length > 0) {
-      const isUser = lastMessage.is_user || false
-      if (isUser) {
-        bufferMessage(lastMessage.mes, characterName, isUser, messageId)
-      } else {
-        scheduleFinalizeLastAssistantMessage(messageId, characterName)
+    if (!lastMessage.mes || lastMessage.mes.trim().length === 0) {
+      if (settings.debugMode) {
+        console.log("[Qdrant Memory] Empty message, skipping")
       }
+      return
+    }
+
+    const isUser = lastMessage.is_user || false
+    
+    if (settings.debugMode) {
+      console.log(`[Qdrant Memory] onMessageSent - isUser: ${isUser}, length: ${lastMessage.mes.length}`)
+    }
+    
+    if (isUser) {
+      // User messages are saved immediately
+      if (settings.debugMode) {
+        console.log("[Qdrant Memory] Buffering user message immediately")
+      }
+      bufferMessage(lastMessage.mes, characterName, true, messageId)
+    } else {
+      // Character messages need to wait for streaming to complete
+      if (settings.debugMode) {
+        console.log("[Qdrant Memory] Character message detected, scheduling finalize poll")
+      }
+      scheduleFinalizeLastAssistantMessage(messageId, characterName)
     }
   } catch (error) {
     console.error("[Qdrant Memory] Error in onMessageSent:", error)
