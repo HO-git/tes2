@@ -864,7 +864,7 @@ function formatMemories(memories) {
     if (payload.isChunk) {
       speakerLabel = `Conversation (${payload.speakers})`
     } else {
-      speakerLabel = payload.speaker === "user" ? "You said" : "Character said"
+      speakerLabel = payload.speaker === "user" ? "User said" : "Character said"
     }
 
     let text = payload.text.replace(/\n/g, " ") // flatten newlines
@@ -923,7 +923,7 @@ function createChunkFromBuffer() {
 
   // Build chunk text with speaker labels
   messageBuffer.forEach((msg) => {
-    const speaker = msg.isUser ? "You" : msg.characterName
+    const speaker = msg.isUser ? "User" : msg.characterName
     speakers.add(speaker)
     messageIds.push(msg.messageId)
 
@@ -1397,7 +1397,7 @@ function createChunkFromMessages(messages) {
   let oldestTimestamp = Number.POSITIVE_INFINITY
 
   messages.forEach((msg) => {
-    const speaker = msg.isUser ? "You" : msg.characterName
+    const speaker = msg.isUser ? "User" : msg.characterName
     speakers.add(speaker)
     messageIds.push(msg.messageId)
 
