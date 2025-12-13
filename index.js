@@ -50,7 +50,17 @@ let chunkTimer = null
 let pendingAssistantFinalize = null
 
 // NEW: Track which chats have had memories injected to prevent duplicates
-const memoryInjectionTracker = new WeakMap()
+const memoryInjectionTracker = new Set()
+
+// Helper to create a unique hash for a chat state
+function getChatHash(chat) {
+  // Create a hash based on the last few messages to identify unique chat states
+  const lastMessages = chat.slice(-5).map(msg => {
+    return `${msg.is_user ? 'U' : 'A'}_${msg.mes?.substring(0, 50) || ''}_${msg.send_date || ''}`
+  }).join('|')
+  
+  return lastMessages
+}
 
 const EMBEDDING_MODEL_OPTIONS = {
   openai: [
@@ -842,12 +852,39 @@ async function searchMemories(query, characterName) {
       }
     }
 
-    // Limit to the requested number of memories
-    results = results.slice(0, settings.memoryLimit)
+    // Deduplicate results based on text similarity
+const uniqueResults = []
+const seenTexts = new Set()
 
-    if (settings.debugMode) {
-      console.log(`[Qdrant Memory] Found ${results.length} valid memories (after retain filter)`)
-    }
+for (const result of results) {
+  const text = result.payload?.text || ""
+  
+  // Create a normalized version for comparison (remove dates, extra whitespace)
+  const normalizedText = text
+    .replace(/\[[\d-]+\]/g, '') // Remove date markers
+    .replace(/\s+/g, ' ')        // Normalize whitespace
+    .trim()
+    .substring(0, 200)           // Compare first 200 chars
+  
+  // Only add if we haven't seen very similar text
+  if (!seenTexts.has(normalizedText)) {
+    seenTexts.add(normalizedText)
+    uniqueResults.push(result)
+  } else if (settings.debugMode) {
+    console.log(`[Qdrant Memory] Filtered duplicate search result: "${normalizedText.substring(0, 50)}..."`)  // ← FIXED: use () not backticks
+  }
+  
+  // Stop if we have enough unique results
+  if (uniqueResults.length >= settings.memoryLimit) {
+    break
+  }
+}
+
+results = uniqueResults
+
+if (settings.debugMode) {
+  console.log(`[Qdrant Memory] Found ${results.length} unique memories (after deduplication)`)  // ← FIXED: use () not backticks
+}
 
     return results
   } catch (error) {
@@ -1617,12 +1654,25 @@ globalThis.qdrantMemoryInterceptor = async (chat, contextSize, abort, type) => {
     return
   }
 
-  // NEW: Check if memories were already injected for this chat array
-  if (settings.preventDuplicateInjection && memoryInjectionTracker.has(chat)) {
-    if (settings.debugMode) {
-      console.log("[Qdrant Memory] Memories already injected for this chat, skipping")
+  // NEW: Use chat hash instead of WeakMap
+  if (settings.preventDuplicateInjection) {
+    const chatHash = getChatHash(chat)
+    
+    if (memoryInjectionTracker.has(chatHash)) {
+      if (settings.debugMode) {
+        console.log("[Qdrant Memory] Memories already injected for this chat state, skipping")
+      }
+      return
     }
-    return
+    
+    // Mark this chat state as having memories injected
+    memoryInjectionTracker.add(chatHash)
+    
+    // Clean up old hashes to prevent memory leaks (keep last 50)
+    if (memoryInjectionTracker.size > 50) {
+      const oldestHash = memoryInjectionTracker.values().next().value
+      memoryInjectionTracker.delete(oldestHash)
+    }
   }
 
   try {
@@ -1681,11 +1731,6 @@ globalThis.qdrantMemoryInterceptor = async (chat, contextSize, abort, type) => {
       // Insert memories at the specified position from the end
       const insertIndex = Math.max(0, chat.length - settings.memoryPosition)
       chat.splice(insertIndex, 0, memoryEntry)
-
-      // NEW: Mark this chat array as having had memories injected
-      if (settings.preventDuplicateInjection) {
-        memoryInjectionTracker.set(chat, true)
-      }
 
       if (settings.debugMode) {
         console.log(`[Qdrant Memory] Injected ${memories.length} memories at position ${insertIndex}`)
