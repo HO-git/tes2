@@ -1709,10 +1709,6 @@ globalThis.qdrantMemoryInterceptor = async (chat, contextSize, abort, type) => {
 // AUTOMATIC MEMORY CREATION
 // ============================================================================
 
-
-// Global variable for tracking streaming state
-let pendingAssistantFinalize = null
-
 function clearPendingAssistantFinalize() {
   if (pendingAssistantFinalize?.pollTimerId) {
     clearInterval(pendingAssistantFinalize.pollTimerId)
