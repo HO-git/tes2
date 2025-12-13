@@ -861,15 +861,22 @@ function formatMemories(memories) {
   if (!memories || memories.length === 0) return ""
 
   let formatted = "\n[Past chat memories]\n\n"
+  
+  // Get persona name for display
+  const personaName = getPersonaName()
 
   memories.forEach((memory) => {
     const payload = memory.payload
 
     let speakerLabel
     if (payload.isChunk) {
+      // For conversation chunks, show all speakers
       speakerLabel = `Conversation (${payload.speakers})`
     } else {
-      speakerLabel = payload.speaker === "user" ? "User said" : "Character said"
+      // For individual messages (legacy format), use persona name
+      speakerLabel = payload.speaker === "user" 
+        ? `${personaName} said`   // ← CHANGED: Use personaName instead of "User"
+        : "Character said"
     }
 
     let text = payload.text.replace(/\n/g, " ") // flatten newlines
@@ -925,10 +932,13 @@ function createChunkFromBuffer() {
   const messageIds = []
   let totalLength = 0
   const currentTimestamp = Date.now()
+  
+  // NEW: Get the persona name once for this chunk
+  const personaName = getPersonaName()
 
   // Build chunk text with speaker labels
   messageBuffer.forEach((msg) => {
-    const speaker = msg.isUser ? "User" : msg.characterName
+    const speaker = msg.isUser ? personaName : msg.characterName  // ← CHANGED: Use personaName
     speakers.add(speaker)
     messageIds.push(msg.messageId)
 
@@ -1254,6 +1264,8 @@ async function loadChatFile(characterName, chatFile) {
 
     const context = getContext()
 
+    
+
     // Try to get the character's avatar URL
     let avatar_url = `${characterName}.png`
     if (context.characters && Array.isArray(context.characters)) {
@@ -1400,9 +1412,12 @@ function createChunkFromMessages(messages) {
   const speakers = new Set()
   const messageIds = []
   let oldestTimestamp = Number.POSITIVE_INFINITY
+  
+  // NEW: Get the persona name once for all messages
+  const personaName = getPersonaName()
 
   messages.forEach((msg) => {
-    const speaker = msg.isUser ? "User" : msg.characterName
+    const speaker = msg.isUser ? personaName : msg.characterName  // ← CHANGED: Use personaName
     speakers.add(speaker)
     messageIds.push(msg.messageId)
 
@@ -1944,6 +1959,24 @@ function getContext() {
     name2: window.name2 || "",
     characters: window.characters || [],
   }
+}
+
+function getPersonaName() {
+  const context = getContext()
+  
+  // Try multiple possible locations for persona name in order of preference
+  const personaName = 
+    context.name1 ||                              // Standard SillyTavern location
+    context.persona?.name ||                      // Alternative location
+    window.name1 ||                               // Direct window access
+    window.SillyTavern?.getContext?.()?.name1 ||  // Through ST API
+    "User"                                        // Fallback to generic "User"
+  
+  if (settings.debugMode && personaName !== "User") {
+    console.log(`[Qdrant Memory] Using persona name: ${personaName}`)
+  }
+  
+  return personaName
 }
 
 function generateUUID() {
